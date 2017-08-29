@@ -231,7 +231,7 @@ export function catchRoute <M extends Match> (routerOrHandler: RouterOrHandler<M
     }
 }
 
-// ifMatch(m1, ifMatch(m2, router)) === ifMatch(matchAll(m1, m2), router)
+// ifMatch(matchAll(m1, m2), router) === ifMatch(m1, ifMatch(m2, router))
 
 export function matchAll <M extends Match, Z extends Match> (m1: Matcher<M, Z>): Matcher<M, Z>
 export function matchAll <M extends Match> (p1: Predicate<M>): Matcher<M, M>
