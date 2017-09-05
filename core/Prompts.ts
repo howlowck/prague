@@ -1,116 +1,142 @@
-import { Observableable, toFilteredObservable, RouterOrHandler, Router, Match, nullRouter, ifMatch, toRouter } from './Router';
+import { Observableable, toFilteredObservable, RouterOrHandler, Router, Match, nullRouter, ifMatch, toRouter, first } from './Router';
+
+// placeholders
+
+interface BotContext extends Match {
+    [name: string]: any;
+
+    state: {
+        conversation: {
+            [name: string]: any;
+            activePrompt: ActivePrompt;
+        }
+    }
+
+    request: {
+        type: string;
+        text: string;
+    }
+    
+    say: (prompt: any) => void;
+
+    prompt: <ARGS extends object, PARAMS extends PromptParams<ARGS>, PROMPT extends Prompt<ARGS, PARAMS>> (prompt: PROMPT) => void;
+    cancelPrompt: () => void
+}
+
+function ifMessage<CONTEXT extends BotContext>(routerOrHandler: RouterOrHandler<CONTEXT>) {
+    return ifMatch(context => context.request.type === 'message', routerOrHandler);
+}
+
+// end placeholders
 
 interface ActivePrompt {
     name: string;
     params: any;
 }
 
-// placeholder for full BotContext
-interface BotContext extends Match {
-    [name: string]: any;
-    state: {
-        conversation: {
-            activePrompt: ActivePrompt;
-        }
-    }
-
-    prompt: <PARAMS extends object> (prompt: IPrompt<PARAMS>) => void;
-    cancelPrompt: () => void
-};
-
 // inside prompt routers, context gets a field called "thisPrompt"
 interface PromptContext <
-    PARAMS extends object,
-    PROMPT extends IPrompt<PARAMS>
+    ARGS extends object,
+    PARAMS extends PromptParams<ARGS>,
+    PROMPT extends Prompt<ARGS, PARAMS>
 > extends BotContext {
     thisPrompt: PROMPT;
 }
 
-interface PromptInstance <PARAMS extends object = any> {
-    say(context: BotContext): void;
-    router(): Router<PromptContext<PARAMS, IPrompt<PARAMS>>>;
-}
-
-interface IPrompt <PARAMS extends object> {
-    _name: string;
-    params: PARAMS;
-    _getPromptInstance(params?: PARAMS): PromptInstance<PARAMS>;
-}
-
-// Prompts is all statics - it contains the registry for prompts, the active prompt, and some helper functions
+// Prompts is all statics - it contains the prompt registry, the active prompt, and some helper methods
 class Prompts {
     private static prompts: {
-        [name: string]: IPrompt<any>;
+        [name: string]: Prompt;
     } = {}
 
     static add(
         name: string,
-        prompt: IPrompt<any>
+        prompt: Prompt
     ) {
         this.prompts[name] = prompt;
     }
 
-    // Here's the function called by context.prompt() - in the real world this would be async when accessing activePrompt
-    static invokePrompt <PARAMS extends object> (
+    // Here's the method called by context.prompt()
+    static invokePrompt (
         context: BotContext,
-        prompt: IPrompt<PARAMS>
+        prompt: Prompt
     ) {
-        prompt._getPromptInstance().say(context);
+        prompt._say(context);
         context.state.conversation.activePrompt = {
             name: prompt._name,
             params: prompt.params
         }
     }
 
-    // Here's the function called by context.cancelPrompt() - in the real world this would be async when accessing activePrompt
+    // Here's the method called by context.cancelPrompt()
     static cancelPrompt() {
         context.state.conversation.activePrompt = undefined;
     }
 
     // if there's an active prompt, route to it
-    static routeTo<CONTEXT extends BotContext>() : Router<CONTEXT> {
-        return {
+    static routeTo<CONTEXT extends BotContext>(): Router<CONTEXT> {
+        return ifMessage({
             getRoute: (context) => toFilteredObservable(context.state.conversation.activePrompt)
                 .flatMap(({ name, params }) => toFilteredObservable(Prompts.prompts[name])
-                    .map(prompt => prompt._getPromptInstance(params).router())
                     .do(_ => context.cancelPrompt())
-                    .flatMap(router => router.getRoute({
-                        ... context as any,
-                        thisPrompt: prompt
-                    }))
+                    .flatMap(prompt => prompt._getRouter(params).getRoute(context))
                 )
-        }
+        } as Router<CONTEXT>);
+    }
+
+    static retry<CONTEXT extends BotContext>(routerOrHandler: RouterOrHandler<CONTEXT>) {
+        return ifMatch(context => context.thisPrompt.params.retries > 0, routerOrHandler);
     }
 }
 
-interface BasePromptParams<ARGS extends object> {
+interface PromptParams<ARGS extends object> {
     say?: string;
     retries?: number;
     with?: ARGS;
 }
 
-abstract class BasePrompt <
-    ARGS extends object,
-    PARAMS extends BasePromptParams<ARGS>
-> implements IPrompt<PARAMS> {
-    constructor(name: string) {
+class Prompt <
+    ARGS extends object = any,
+    PARAMS extends PromptParams<ARGS> = PromptParams<ARGS>
+> {
+    constructor(
+        name: string,
+        router: RouterOrHandler<PromptContext<ARGS, PARAMS, Prompt<ARGS, PARAMS>>>
+    ) {
         Prompts.add(name, this);  
-        this._name = name;  
+        this._name = name;
+        this._router = toRouter(router);
     }
 
     _name: string;
-    params: PARAMS = {} as any;
+    _router: Router<PromptContext<ARGS, PARAMS, Prompt<ARGS, PARAMS>>>;
 
-    abstract _getPromptInstance(params?: PARAMS): PromptInstance<PARAMS>;
+    _say(context: BotContext) {
+        if (this.params.say)
+            context.say(this.params.say);
+    }
+
+    _getRouter(params: PARAMS): Router<BotContext> {
+        return {
+            getRoute: (context) => this._router.getRoute({
+                ... context,
+                thisPrompt: this._cloneWithParams(params)
+            })
+        }
+    }
+
+    private _cloneWithParams (params: PARAMS): this {
+        return Object.assign(Object.create(Object.getPrototypeOf(this)), this, { params })
+    }
 
     protected _cloneWithParam <T> (name: string, value: T): this {
-        return Object.assign(Object.create(Object.getPrototypeOf(this)), this, {
-            params: {
-                ... this.params as any, 
-                [name]: value
-            }
-        });
+        return this._cloneWithParams({
+            ... this.params as any, 
+            [name]: value
+        } as PARAMS);
     }
+
+    params: PARAMS = {} as any;
 
     say(prompt: string) {
         return this._cloneWithParam('say', prompt);
@@ -120,108 +146,161 @@ abstract class BasePrompt <
         return this._cloneWithParam('retries', triesLeft);
     }
 
+    retry() {
+        return this.params.retries > 0
+            ? this._cloneWithParam('retries', this.params.retries - 1)
+            : this;
+    }
+
     with(args: ARGS) {
         return this._cloneWithParam('with', args);
     }
 }
 
-class Prompt <
-    ARGS extends object = any,
-> extends BasePrompt<ARGS, BasePromptParams<ARGS>> {
-    private router: Router<PromptContext<BasePromptParams<ARGS>, Prompt<ARGS>>>;
-
-    constructor(
-        name: string,
-        routerOrHandler: RouterOrHandler<PromptContext<BasePromptParams<ARGS>, Prompt<ARGS>>>
-    ) {
-        super(name);
-        this.router = toRouter(routerOrHandler);
-    }
-
-    _getPromptInstance(params?: BasePromptParams<ARGS>): PromptInstance<BasePromptParams<ARGS>> {
-        return {
-            say: (context) => {
-                if (params.say)
-                    context.say(params.say);
-            },
-
-            router: () => this.router
-        }
-    }
-}
-
-// some sample code
+// begin sample code
 let context: BotContext;
 
-const myPromptHere = new Prompt<{ foo: string }>('name', context => {
+const myPrompt = new Prompt<{ foo: string }>('name', context => {
     context.say(`You did good, ${context.thisPrompt.params.with.foo}`);
     context.prompt(context.thisPrompt.say("how ya doing?").with({ foo: "dog" }));
 });
 
-context.prompt(myPromptHere.say("Yo yo").with({ foo: "cat" }));
+context.prompt(myPrompt.say("Yo yo").with({ foo: "cat" }));
 // end sample code
 
-class TextPrompt<ARGS extends object = any> implements IPrompt<ARGS> {
-    private ifRouter: Router<PromptContext<ARGS>>;
-    private elseRouter: Router<PromptContext<ARGS>>;
-    constructor(
-        name: string,
-        ifRouterOrHandler: RouterOrHandler<PromptContext<ARGS>>,
-        elseRouterOrHandler?: RouterOrHandler<PromptContext<ARGS>>
-    ) {
-        this.ifRouter = toRouter(ifRouterOrHandler);
-        this.elseRouter = elseRouterOrHandler ? toRouter(elseRouterOrHandler) : nullRouter;
-    }
+// inside prompt error routers, context gets a field called "error"
+interface IErrorContext {
+    error: string;
+}
 
-    _getPromptInstance(params?: PromptParams<ARGS>) {
-        return {
-            say: ()
+interface Parser<CONTEXT extends BotContext> {
+    (context: CONTEXT): CONTEXT | string;
+}
+
+function parse<CONTEXT extends BotContext>(
+    parser: Parser<CONTEXT>,
+    parsedRouterOrHandler: RouterOrHandler<CONTEXT>,
+    errorRouterOrHandler?: RouterOrHandler<CONTEXT & IErrorContext>
+): Router<CONTEXT> {
+    const parsedRouter = toRouter(parsedRouterOrHandler);
+    const errorRouter = errorRouterOrHandler ? toRouter(errorRouterOrHandler): nullRouter;
+
+    return {
+        getRoute: (context) => {
+            const parseResult = parser(context);
+            return typeof parseResult === 'string'
+                ? errorRouter
+                    .getRoute({
+                        ... context as any,
+                        error: parseResult
+                    })
+                : parsedRouter
+                    .getRoute(parseResult);
         }
     }
-
-    ask(prompt: string);
-    retries(triesLeft: number);
 }
+
+function parseText<CONTEXT extends BotContext>(context: CONTEXT) {
+    if (context.request.text.length === 0)
+        return "Empty String";
+
+    return {
+        ... context as any,
+        // put text into entities
+    }
+}
+
+class TextPrompt<ARGS extends object = any> extends Prompt<ARGS> {
+    constructor(
+        name: string,
+        promptRouterOrHandler: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>>>,
+        errorRouterOrHandler?: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>> & IErrorContext>
+    ) {
+        super(name, parse(parseText, promptRouterOrHandler, errorRouterOrHandler));
+    }
+}
+
+// begin sample code
+// const myTextPrompt = new TextPrompt('text', context => {
+//     context.say(`You did good, ${context.thisPrompt.params.with.foo}`);
+// }, context => {
+//     if (context.error == "Empty String")
+//         context.prompt(context.thisPrompt.say("I must insist you type something."));
+// });
+
+// context.prompt(myTextPrompt.say("Yo yo").with({ foo: "cat" }));
+// end sample code
 
 const choicesToSuggestedActions = (choices: string[]) => {};
 
-class ChoicePrompt<ARGS> extends Prompt<ARGS>{
-    private params: ChoicePromptParams;
-    constructor(name: string, routerOrHandler: routerOrHandler<PromptContext<ChoicePrompt>>);
-    _getPromptInstance(params?: {
-        ask: string;
-        retries: number;
-        choices: string[];
-    }): PromptInstance<ARGS, ChoicePrompt> {
-        return {
-            ask: (context: BotContext) => {
-                context.say({
-                    type: 'text',
-                    text,
-                    suggestedActions: choicesToSuggestedActions(args.choices)
-                }),
-            
-            router: 
-        
-        }
-    }
-    ask(prompt: string);
-    retries(triesLeft: number);
-    choices(choices: string[]);
+interface ChoicePromptParams<ARGS extends object = any> extends PromptParams<ARGS> {
+    choices: string[]; // replace with more sophisticated type
 }
 
+function parseChoices<CONTEXT extends BotContext>(context: CONTEXT, choices: string[]) {
+    if (context.request.text.length === 0)
+        return "Empty String";
 
+    const choice = choices.find(choice => choice === context.request.text);
+    if (!choice)
+        return "Not one of the listed choices";
 
-// How does retries work?
+    return {
+        ... context as any,
+        // put choice into entities
+    }
+}
 
-// The router wants this:
+class ChoicePrompt<ARGS extends object = any> extends Prompt<ARGS, ChoicePromptParams<ARGS>> {
+    constructor(
+        name: string,
+        promptRouterOrHandler: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>>>,
+        errorRouterOrHandler?: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>> & IErrorContext>
+    ) {
+        super(name, parse(
+            (context: PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>>) => parseChoices(context, context.params.choices),
+            promptRouterOrHandler,
+            errorRouterOrHandler
+        ));
+    }
 
-const foo = new Prompt('foo', ifMatch(c => c.request.text === "I love you",
-    c => c.say("I know."),
-    ifMatch(c => c.thisPrompt.retries == null || c.prompt.retries > 0, c => {
-        if (c.prompt.retries == null)
-            c.prompt.retries = 5;
-        c.say("Say it. You know you want to say it.");
-        c.prompt(c.thisPrompt.retries(c.thisPrompt.params.retries - 1))
-    })
-));
+    _say(context: BotContext) {
+        if (!this.params.choices) {
+            console.warn("ChoicePrompt must have choices");
+            return;
+        }
+        context.say({
+            type: 'message',
+            text: this.params.say,
+            suggestedActions: choicesToSuggestedActions(this.params.choices)
+        });
+    }
+
+    choices(choices: string[]) {
+        return this._cloneWithParam('choices', choices);        
+    }
+}
+
+// begin sample code
+// const myChoicePrompt = new ChoicePrompt('choice', context => {
+//     context.say(`You chose ${context.getEntity('string')}`);
+// }, context => {
+//     if (context.error == "Empty String")
+//         context.prompt(context.thisPrompt.say("I must insist you type something."));
+// }).choices(['red', 'green', 'blue']).say("Default prompt");
+
+// context.prompt(myChoicePrompt.say("Yo yo").with({ foo: "cat" }));
+// end sample code
+
+// retries
+
+// begin sample code
+const foo = new Prompt<{foo: string}>('foo', ifMatch(context => context.request.text === "I love you",
+    context => context.say("I know."),
+    Prompts.retry(context =>
+        context.thisPrompt.say("Say it. You know you want to say it.").retry()
+    )
+)).retries(5);
+// end sample code
+
+// Playground below
