@@ -19,7 +19,7 @@ interface BotContext extends Match {
     
     say: (prompt: any) => void;
 
-    prompt: <ARGS extends object, PARAMS extends PromptParams<ARGS>, PROMPT extends Prompt<ARGS, PARAMS>> (prompt: PROMPT) => void;
+    prompt: <WITH extends object, PARAMS extends PromptParams<WITH>, PROMPT extends Prompt<WITH, PARAMS>> (prompt: PROMPT) => void;
     cancelPrompt: () => void
 }
 
@@ -40,9 +40,9 @@ interface ActivePrompt {
 
 // inside prompt routers, context gets a field called "thisPrompt"
 interface PromptContext <
-    ARGS extends object,
-    PARAMS extends PromptParams<ARGS>,
-    PROMPT extends Prompt<ARGS, PARAMS>
+    WITH extends object,
+    PARAMS extends PromptParams<WITH>,
+    PROMPT extends Prompt<WITH, PARAMS>
 > extends BotContext {
     thisPrompt: PROMPT;
 }
@@ -73,19 +73,18 @@ class Prompts {
     }
 
     // Here's the method called by context.cancelPrompt()
-    static cancelPrompt() {
+    static cancelPrompt(context: BotContext) {
         context.state.conversation.activePrompt = undefined;
     }
 
     // if there's an active prompt, route to it
     static routeTo<CONTEXT extends BotContext>(): Router<CONTEXT> {
-        return ifMessage({
-            getRoute: (context) => toFilteredObservable(context.state.conversation.activePrompt)
-                .flatMap(({ name, params }) => toFilteredObservable(Prompts.prompts[name])
-                    .do(_ => context.cancelPrompt())
-                    .flatMap(prompt => prompt._getRouter(params).getRoute(context))
-                )
-        } as Router<CONTEXT>);
+        return ifMessage(new Router(context => toFilteredObservable(context.state.conversation.activePrompt)
+            .flatMap(({ name, params }) => toFilteredObservable(Prompts.prompts[name])
+                .do(_ => context.cancelPrompt())
+                .flatMap(prompt => prompt._getRouter(params).getRoute(context))
+            )
+        ));
     }
 
     static retry<CONTEXT extends BotContext>(routerOrHandler: RouterOrHandler<CONTEXT>) {
@@ -93,71 +92,71 @@ class Prompts {
     }
 }
 
-interface PromptParams<ARGS extends object> {
+interface PromptParams<WITH extends object> {
     say?: string;
     retries?: number;
-    with?: ARGS;
+    with?: WITH;
 }
 
 class Prompt <
-    ARGS extends object = any,
-    PARAMS extends PromptParams<ARGS> = PromptParams<ARGS>
+    WITH extends object = any,
+    PARAMS extends PromptParams<WITH> = PromptParams<WITH>
 > {
+    _getRouter: (params: PARAMS) => Router<BotContext>;
+
     constructor(
         name: string,
-        router: RouterOrHandler<PromptContext<ARGS, PARAMS, Prompt<ARGS, PARAMS>>>
+        router: RouterOrHandler<PromptContext<WITH, PARAMS, Prompt<WITH, PARAMS>>>
     ) {
         Prompts.add(name, this);  
         this._name = name;
-        this._router = toRouter(router);
+        const _router = toRouter(router);
+        this._getRouter = params => ifMatch(
+            (context: BotContext) => ({
+                ... context,
+                thisPrompt: this._cloneWithParams(params)
+            }),
+            _router
+        );
     }
 
     _name: string;
-    _router: Router<PromptContext<ARGS, PARAMS, Prompt<ARGS, PARAMS>>>;
+    _router: Router<PromptContext<WITH, PARAMS, Prompt<WITH, PARAMS>>>;
 
     _say(context: BotContext) {
         if (this.params.say)
             context.say(this.params.say);
     }
 
-    _getRouter(params: PARAMS): Router<BotContext> {
-        return {
-            getRoute: (context) => this._router.getRoute({
-                ... context,
-                thisPrompt: this._cloneWithParams(params)
-            })
-        }
-    }
-
     private _cloneWithParams (params: PARAMS): this {
         return Object.assign(Object.create(Object.getPrototypeOf(this)), this, { params })
     }
 
-    protected _cloneWithParam <T> (name: string, value: T): this {
+    protected _cloneWithParam (param): this {
         return this._cloneWithParams({
             ... this.params as any, 
-            [name]: value
+            param
         } as PARAMS);
     }
 
     params: PARAMS = {} as any;
 
-    say(prompt: string) {
-        return this._cloneWithParam('say', prompt);
+    say(say: string) {
+        return this._cloneWithParam({ say });
     }
 
-    retries(triesLeft: number) {
-        return this._cloneWithParam('retries', triesLeft);
+    retries(retries: number) {
+        return this._cloneWithParam({ retries });
     }
 
     retry() {
         return this.params.retries > 0
-            ? this._cloneWithParam('retries', this.params.retries - 1)
+            ? this._cloneWithParam({ retries: this.params.retries - 1 })
             : this;
     }
 
-    with(args: ARGS) {
-        return this._cloneWithParam('with', args);
+    with(withArgs: WITH) {
+        return this._cloneWithParam({ with: withArgs });
     }
 }
 
@@ -203,11 +202,11 @@ function parseText<CONTEXT extends BotContext>(context: CONTEXT) {
     }
 }
 
-class TextPrompt<ARGS extends object = any> extends Prompt<ARGS> {
+class TextPrompt<WITH extends object = any> extends Prompt<WITH> {
     constructor(
         name: string,
-        promptRouterOrHandler: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>>>,
-        errorRouterOrHandler?: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>> & IErrorContext>
+        promptRouterOrHandler: RouterOrHandler<PromptContext<WITH, PromptParams<WITH>, TextPrompt<WITH>>>,
+        errorRouterOrHandler?: RouterOrHandler<PromptContext<WITH, PromptParams<WITH>, TextPrompt<WITH>> & IErrorContext>
     ) {
         super(name, parse(parseText, promptRouterOrHandler, errorRouterOrHandler));
     }
@@ -215,7 +214,7 @@ class TextPrompt<ARGS extends object = any> extends Prompt<ARGS> {
 
 const choicesToSuggestedActions = (choices: string[]) => {};
 
-interface ChoicePromptParams<ARGS extends object = any> extends PromptParams<ARGS> {
+interface ChoicePromptParams<WITH extends object = any> extends PromptParams<WITH> {
     choices: string[]; // replace with more sophisticated type
 }
 
@@ -233,14 +232,14 @@ function parseChoices<CONTEXT extends BotContext>(context: CONTEXT, choices: str
     }
 }
 
-class ChoicePrompt<ARGS extends object = any> extends Prompt<ARGS, ChoicePromptParams<ARGS>> {
+class ChoicePrompt<WITH extends object = any> extends Prompt<WITH, ChoicePromptParams<WITH>> {
     constructor(
         name: string,
-        promptRouterOrHandler: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>>>,
-        errorRouterOrHandler?: RouterOrHandler<PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>> & IErrorContext>
+        promptRouterOrHandler: RouterOrHandler<PromptContext<WITH, PromptParams<WITH>, TextPrompt<WITH>>>,
+        errorRouterOrHandler?: RouterOrHandler<PromptContext<WITH, PromptParams<WITH>, TextPrompt<WITH>> & IErrorContext>
     ) {
         super(name, parse(
-            (context: PromptContext<ARGS, PromptParams<ARGS>, TextPrompt<ARGS>>) => parseChoices(context, context.params.choices),
+            (context: PromptContext<WITH, PromptParams<WITH>, TextPrompt<WITH>>) => parseChoices(context, context.params.choices),
             promptRouterOrHandler,
             errorRouterOrHandler
         ));
@@ -259,6 +258,6 @@ class ChoicePrompt<ARGS extends object = any> extends Prompt<ARGS, ChoicePromptP
     }
 
     choices(choices: string[]) {
-        return this._cloneWithParam('choices', choices);        
+        return this._cloneWithParam({ choices });        
     }
 }
