@@ -1,7 +1,6 @@
 import { Observableable, toFilteredObservable, RouterOrHandler, Router, Match, nullRouter, ifMatch, toRouter, first } from './Router';
 
-// placeholders
-
+// stubs that save us from having to integrate into the full SDK during development
 interface BotContext extends Match {
     [name: string]: any;
 
@@ -24,14 +23,13 @@ interface BotContext extends Match {
 }
 
 function ifMessage<CONTEXT extends BotContext>(routerOrHandler: RouterOrHandler<CONTEXT>) {
-    return ifMatch(context => context.request.type === 'message', routerOrHandler);
+    return nullRouter as Router<CONTEXT>;
 }
 
 function ifRegEx<CONTEXT extends BotContext>(regex: RegExp, routerOrHandler: RouterOrHandler<CONTEXT>) {
-    return nullRouter;
+    return nullRouter as Router<CONTEXT>;
 }
-
-// end placeholders
+// end stubs
 
 interface ActivePrompt {
     name: string;
@@ -78,8 +76,8 @@ class Prompts {
     }
 
     // if there's an active prompt, route to it
-    static routeTo<CONTEXT extends BotContext>(): Router<CONTEXT> {
-        return ifMessage(new Router(context => toFilteredObservable(context.state.conversation.activePrompt)
+    static routeTo<CONTEXT extends BotContext>() {
+        return ifMessage(new Router<CONTEXT>(context => toFilteredObservable(context.state.conversation.activePrompt)
             .flatMap(({ name, params }) => toFilteredObservable(Prompts.prompts[name])
                 .do(_ => context.cancelPrompt())
                 .flatMap(prompt => prompt._getRouter(params).getRoute(context))
@@ -177,19 +175,17 @@ function parse<CONTEXT extends BotContext>(
     const parsedRouter = toRouter(parsedRouterOrHandler);
     const errorRouter = errorRouterOrHandler ? toRouter(errorRouterOrHandler): nullRouter;
 
-    return {
-        getRoute: (context) => {
-            const parseResult = parser(context);
-            return typeof parseResult === 'string'
-                ? errorRouter
-                    .getRoute({
-                        ... context as any,
-                        error: parseResult
-                    })
-                : parsedRouter
-                    .getRoute(parseResult);
-        }
-    }
+    return new Router(context => {
+        const parseResult = parser(context);
+        return typeof parseResult === 'string'
+            ? errorRouter
+                .getRoute({
+                    ... context as any,
+                    error: parseResult
+                })
+            : parsedRouter
+                .getRoute(parseResult);
+    });
 }
 
 function parseText<CONTEXT extends BotContext>(context: CONTEXT) {
