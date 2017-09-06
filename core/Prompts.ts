@@ -27,6 +27,10 @@ function ifMessage<CONTEXT extends BotContext>(routerOrHandler: RouterOrHandler<
     return ifMatch(context => context.request.type === 'message', routerOrHandler);
 }
 
+function ifRegEx<CONTEXT extends BotContext>(regex: RegExp, routerOrHandler: RouterOrHandler<CONTEXT>) {
+    return nullRouter;
+}
+
 // end placeholders
 
 interface ActivePrompt {
@@ -157,17 +161,6 @@ class Prompt <
     }
 }
 
-// begin sample code
-let context: BotContext;
-
-const myPrompt = new Prompt<{ foo: string }>('name', context => {
-    context.say(`You did good, ${context.thisPrompt.params.with.foo}`);
-    context.prompt(context.thisPrompt.say("how ya doing?").with({ foo: "dog" }));
-});
-
-context.prompt(myPrompt.say("Yo yo").with({ foo: "cat" }));
-// end sample code
-
 // inside prompt error routers, context gets a field called "error"
 interface IErrorContext {
     error: string;
@@ -220,17 +213,6 @@ class TextPrompt<ARGS extends object = any> extends Prompt<ARGS> {
     }
 }
 
-// begin sample code
-// const myTextPrompt = new TextPrompt('text', context => {
-//     context.say(`You did good, ${context.thisPrompt.params.with.foo}`);
-// }, context => {
-//     if (context.error == "Empty String")
-//         context.prompt(context.thisPrompt.say("I must insist you type something."));
-// });
-
-// context.prompt(myTextPrompt.say("Yo yo").with({ foo: "cat" }));
-// end sample code
-
 const choicesToSuggestedActions = (choices: string[]) => {};
 
 interface ChoicePromptParams<ARGS extends object = any> extends PromptParams<ARGS> {
@@ -280,27 +262,3 @@ class ChoicePrompt<ARGS extends object = any> extends Prompt<ARGS, ChoicePromptP
         return this._cloneWithParam('choices', choices);        
     }
 }
-
-// begin sample code
-// const myChoicePrompt = new ChoicePrompt('choice', context => {
-//     context.say(`You chose ${context.getEntity('string')}`);
-// }, context => {
-//     if (context.error == "Empty String")
-//         context.prompt(context.thisPrompt.say("I must insist you type something."));
-// }).choices(['red', 'green', 'blue']).say("Default prompt");
-
-// context.prompt(myChoicePrompt.say("Yo yo").with({ foo: "cat" }));
-// end sample code
-
-// retries
-
-// begin sample code
-const foo = new Prompt<{foo: string}>('foo', ifMatch(context => context.request.text === "I love you",
-    context => context.say("I know."),
-    Prompts.retry(context =>
-        context.thisPrompt.say("Say it. You know you want to say it.").retry()
-    )
-)).retries(5);
-// end sample code
-
-// Playground below
