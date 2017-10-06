@@ -23,7 +23,7 @@ export function toFilteredObservable <T> (t: Observableable<T>) {
 
 export interface Route {
     score?: number;
-    thrown?: true;
+    thrown?: string;
     action: () => Observableable<any>;
 }
 
@@ -219,20 +219,38 @@ export function ifMatches <M extends Routable, N extends Routable> (
     return new ifMatchesRouter(matcher, thenRouterOrHandler, elseRouterOrHandler);
 }
 
-const thrownRoute: Route = {
-    thrown: true,
-    action: () => {}
-};
-
-export function throwRoute <M extends Routable> () {
-    return new Router<M>(m => Observable.of(thrownRoute));
+export class ThrowRouter <M extends Routable> extends Router<M> {
+    constructor(name: string) {
+        super(m => Observable.of({
+            thrown: name,
+            action: () => {
+                console.warn(`A thrown route named ${name} was executed.`);
+            }
+        }));
+    }
 }
 
-export function catchRoute <M extends Routable> (routerOrHandler: RouterOrHandler<M>): Router<M> {
-    return new Router<M>(m => Router.from(routerOrHandler)
-        .getRoute(m)
-        .filter(route => !route.thrown)
-    );
+export function throwRoute <M extends Routable> (name: string) {
+    return new ThrowRouter(name);
+}
+
+export class CatchRouter <M extends Routable> extends Router<M> {
+    constructor(routerOrHandler: RouterOrHandler<M>, getRouter: (route: Route) => RouterOrHandler<M>) {
+        super(m => Router.from(routerOrHandler)
+            .getRoute(m)
+            .flatMap(route => route.thrown
+                ? Router.from(getRouter(route)).getRoute(m)
+                : Observable.of(route)
+            )
+        );
+    }
+}
+
+export function catchRoute <M extends Routable> (
+    routerOrHandler: RouterOrHandler<M>,
+    getRouter: (route: Route) => RouterOrHandler<M>
+): Router<M> {
+    return new CatchRouter<M>(routerOrHandler, getRouter);
 }
 
 export class BeforeRouter <M extends Routable> extends Router<M> {

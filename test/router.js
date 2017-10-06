@@ -1108,10 +1108,10 @@ describe('ifMatches', () => {
 
 describe('throwRoute', () => {
     it("should throw a route with thrown === true", (done) => {
-        throwRoute()
+        throwRoute('foo')
             .getRoute(foo)
             .subscribe(route => {
-                expect(route.thrown).to.be.true;
+                expect(route.thrown).to.eql('foo');
                 done();
             });
     });
@@ -1123,7 +1123,9 @@ describe('catchRoute', () => {
 
         catchRoute(m => {
             routed = true;
-        })
+        },
+        route => throwErr
+        )
             .route(foo)
             .subscribe(n => {
                 expect(routed).to.be.true;
@@ -1136,7 +1138,9 @@ describe('catchRoute', () => {
 
         catchRoute(Router.fromHandler(m => {
             routed = true;
-        }))
+        },
+        route => throwErr
+        ))
             .route(foo)
             .subscribe(n => {
                 expect(routed).to.be.true;
@@ -1144,13 +1148,40 @@ describe('catchRoute', () => {
             });
     });
 
-    it("should complete and never emit with a thrown route", (done) => {
+    it("should call the supplied handler with a thrown route", (done) => {
         let routed;
 
-        catchRoute(throwRoute())
+        catchRoute(
+            throwRoute('foo'),
+            route => m => {
+                expect(route.thrown).to.eql('foo');
+                routed = true;
+            }
+        )
             .route(foo)
-            .subscribe(throwErr, passErr, done);
+            .subscribe(n => {
+                expect(routed).to.be.true;
+                done();
+            });
     });
+
+    it("should call the supplied router with a thrown route", (done) => {
+        let routed;
+
+        catchRoute(
+            throwRoute('foo'),
+            route => Router.fromHandler(m => {
+                expect(route.thrown).to.eql('foo');
+                routed = true;
+            })
+        )
+            .route(foo)
+            .subscribe(n => {
+                expect(routed).to.be.true;
+                done();
+            });
+    });
+
 });
 
 describe("before", () => {
