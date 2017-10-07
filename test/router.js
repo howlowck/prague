@@ -1108,7 +1108,8 @@ describe('ifMatches', () => {
 
 describe('Router.abstractRoute', () => {
     it("should create an abstract route with the supplied name", (done) => {
-        Router.abstractRoute('foo')
+        Router
+            .abstractRoute('foo')
             .getRoute(foo)
             .subscribe(route => {
                 expect(route.name).to.eql('foo');
@@ -1117,7 +1118,8 @@ describe('Router.abstractRoute', () => {
     });
 
     it("should create an abstract route with the supplied name and value", (done) => {
-        Router.abstractRoute('foo', { bar: 'bar' })
+        Router
+            .abstractRoute('foo', { bar: 'bar' })
             .getRoute(foo)
             .subscribe(route => {
                 expect(route.name).to.eql('foo');
@@ -1127,7 +1129,8 @@ describe('Router.abstractRoute', () => {
     });
 
     it("should use the supplied function to create an abstract route with name ", (done) => {
-        Router.abstractRoute(m => ({ name: 'foo' }))
+        Router
+            .abstractRoute(m => ({ name: 'foo' }))
             .getRoute(foo)
             .subscribe(route => {
                 expect(route.name).to.eql('foo');
@@ -1136,7 +1139,8 @@ describe('Router.abstractRoute', () => {
     });
 
     it("should use the supplied function to create an abstract route with name and value", (done) => {
-        Router.abstractRoute(m => ({ name: 'foo', value: { bar: 'bar'} }))
+        Router
+            .abstractRoute(m => ({ name: 'foo', value: { bar: 'bar'} }))
             .getRoute(foo)
             .subscribe(route => {
                 expect(route.name).to.eql('foo');
