@@ -3,7 +3,7 @@
 const chai = require('chai');
 chai.use(require('chai-subset'));
 const expect = chai.expect;
-const { toObservable, toFilteredObservable, Router, first, best, run, toScore, routeWithCombinedScore, ifTrue, ifMatches, throwRoute, catchRoute, before, after } = require('../dist/prague.js');
+const { toObservable, toFilteredObservable, Router, first, best, run, toScore, routeWithCombinedScore, ifTrue, ifMatches, before, after } = require('../dist/prague.js');
 const { Observable } = require('rxjs');
 
 const foo = {
@@ -1106,82 +1106,117 @@ describe('ifMatches', () => {
     });
 });
 
-describe('throwRoute', () => {
-    it("should throw a route with thrown === true", (done) => {
-        throwRoute('foo')
+describe('Router.abstractRoute', () => {
+    it("should create an abstract route with the supplied name", (done) => {
+        Router.abstractRoute('foo')
             .getRoute(foo)
             .subscribe(route => {
-                expect(route.thrown).to.eql('foo');
+                expect(route.name).to.eql('foo');
+                done();
+            });
+    });
+
+    it("should create an abstract route with the supplied name and value", (done) => {
+        Router.abstractRoute('foo', { bar: 'bar' })
+            .getRoute(foo)
+            .subscribe(route => {
+                expect(route.name).to.eql('foo');
+                expect(route.value.bar).to.eql('bar');
+                done();
+            });
+    });
+
+    it("should use the supplied function to create an abstract route with name ", (done) => {
+        Router.abstractRoute(m => ({ name: 'foo' }))
+            .getRoute(foo)
+            .subscribe(route => {
+                expect(route.name).to.eql('foo');
+                done();
+            });
+    });
+
+    it("should use the supplied function to create an abstract route with name and value", (done) => {
+        Router.abstractRoute(m => ({ name: 'foo', value: { bar: 'bar'} }))
+            .getRoute(foo)
+            .subscribe(route => {
+                expect(route.name).to.eql('foo');
+                expect(route.value.bar).to.eql('bar');
                 done();
             });
     });
 });
 
-describe('catchRoute', () => {
-    it("should pass through the route from a handler", (done) => {
-        let routed;
-
-        catchRoute(m => {
-            routed = true;
-        },
-        route => throwErr
-        )
+describe('Router.catchAbstractRoute', () => {
+    it("should complete and never emit (and not call supplied router) with null router", (done) => {
+        Router
+            .null
+            .catchAbstractRoute(route => throwErr)
             .route(foo)
-            .subscribe(n => {
-                expect(routed).to.be.true;
+            .subscribe(throwErr, passErr, done)
+    });
+
+    it("should return action route and not call supplied router", (done) => {
+        var routed;
+    
+        Router
+            .fromHandler(m => { routed = true; })
+            .catchAbstractRoute(route => throwErr)
+            .route(foo)
+            .subscribe(route => {
+                expect(routed).to.eql(true);
                 done();
             });
     });
 
-    it("should pass through the route from a non-throwing router", (done) => {
-        let routed;
-
-        catchRoute(Router.fromHandler(m => {
-            routed = true;
-        },
-        route => throwErr
-        ))
-            .route(foo)
-            .subscribe(n => {
-                expect(routed).to.be.true;
-                done();
-            });
-    });
-
-    it("should call the supplied handler with a thrown route", (done) => {
-        let routed;
-
-        catchRoute(
-            throwRoute('foo'),
-            route => m => {
-                expect(route.thrown).to.eql('foo');
-                routed = true;
-            }
-        )
-            .route(foo)
-            .subscribe(n => {
-                expect(routed).to.be.true;
-                done();
-            });
-    });
-
-    it("should call the supplied router with a thrown route", (done) => {
-        let routed;
-
-        catchRoute(
-            throwRoute('foo'),
-            route => Router.fromHandler(m => {
-                expect(route.thrown).to.eql('foo');
+    it("should route to supplied router on abstract route", (done) => {
+        var routed;
+    
+        Router
+            .abstractRoute('foo')
+            .catchAbstractRoute(route => m => { 
+                expect(route.name).to.eql('foo');
                 routed = true;
             })
-        )
             .route(foo)
-            .subscribe(n => {
-                expect(routed).to.be.true;
+            .subscribe(route => {
+                expect(routed).to.eql(true);
                 done();
             });
     });
 
+    it("should route to complex router on abstract route", (done) => {
+        var routed;
+    
+        Router
+            .abstractRoute('foo')
+            .catchAbstractRoute(route => first(m => { 
+                expect(route.name).to.eql('foo');
+                routed = true;
+            }))
+            .route(foo)
+            .subscribe(route => {
+                expect(routed).to.eql(true);
+                done();
+            });
+    });
+
+    it("abstract route should be routed through complex router", (done) => {
+        var routed;
+    
+        first(
+            Router.abstractRoute('foo'),
+            throwErr
+        )
+            .catchAbstractRoute(route => m => { 
+                expect(route.name).to.eql('foo');
+                routed = true;
+            })
+            .route(foo)
+            .subscribe(route => {
+                expect(routed).to.eql(true);
+                done();
+            });
+    });
 });
 
 describe("before", () => {

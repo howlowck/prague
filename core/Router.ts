@@ -21,11 +21,22 @@ export function toFilteredObservable <T> (t: Observableable<T>) {
     return Observable.of(t);
 }
 
-export interface Route {
+export interface BaseRoute {
     score?: number;
-    thrown?: string;
+}
+
+export interface ActionRoute extends BaseRoute {
+    type: 'action';
     action: () => Observableable<any>;
 }
+
+export interface AbstractRoute extends BaseRoute {
+    type: 'abstract';
+    name: string;
+    value?: object;
+}
+
+export type Route = ActionRoute | AbstractRoute;
 
 export interface Routable {
     score?: number;
@@ -37,11 +48,21 @@ export interface Handler <Z extends Routable = {}> {
 
 export type RouterOrHandler <M extends Routable = {}> = Router<M> | Handler<M>;
 
+export interface AbstractRouteNameValue {
+    name: string,
+    value?: object
+}
+
+export interface GetRoute <M extends Routable> {
+    (m: M): Observable<Route>;
+}
+
 export class Router <M extends Routable> {
-    constructor(public getRoute: (m: M) => Observable<Route>) {}
+    constructor(public getRoute: GetRoute<M>) {}
 
     static fromHandler <M extends Routable> (handler: Handler<M>) {
         return new Router<M>(m => Observable.of({
+            type: 'action',
             action: () => handler(m)
         } as Route));
     }
@@ -61,10 +82,43 @@ export class Router <M extends Routable> {
             .map(routerOrHandler => Router.from(routerOrHandler));
     }
     
+    static abstractRouteWarning = (route: AbstractRoute) => m => {
+        console.warn(`An attempt was made to execute an abstract route named ${route.name} with value ${route.value}`);
+    }
+    
+    static abstractRoute <M extends Routable> (name: string, value?: object): Router<M>;
+    static abstractRoute <M extends Routable> (getAbstractRouteNameValue: (m: M) => Observableable<AbstractRouteNameValue>): Router<M>;
+    static abstractRoute <M extends Routable> (... args): Router<M> {
+        return new Router(typeof args[0] === 'string'
+            ? m => Observable.of({
+                    type: 'abstract',
+                    name: args[0],
+                    value: args[1]
+                } as Route) 
+            : m => toObservable(args[0](m))
+                .map((nameValue: AbstractRouteNameValue) => ({
+                    type: 'abstract',
+                    ... nameValue
+                } as Route))
+        );
+    }
+    
+    catchAbstractRoute(getRouter: (route: AbstractRoute) => RouterOrHandler<M>): Router<M> {
+        return new Router(m => this
+            .getRoute(m)
+            .flatMap(route => route.type === "abstract"
+                ? Router.from(getRouter(route)).getRoute(m)
+                : Observable.of(route)
+            )
+        );
+    }
+
     route (m: M) {
-        return this.getRoute(m)
+        return this
+            .catchAbstractRoute(Router.abstractRouteWarning)
+            .getRoute(m)
             .do(route => konsole.log("route: returned a route", route))
-            .flatMap(route => toObservable(route.action()))
+            .flatMap((route: ActionRoute) => toObservable(route.action()))
             .do(_ => konsole.log("route: called action"));
     }
 }
@@ -73,13 +127,12 @@ export class FirstRouter <M extends Routable> extends Router<M> {
     constructor (... routersOrHandlers: RouterOrHandler<M>[]) {
         const router$ = Observable.from(Router.routersFrom(routersOrHandlers));
         super(m => router$
-            .concatMap(
-                (router, i) => {
-                    konsole.log(`first: trying router #${i}`);
-                    return router.getRoute(m)
-                        .do(n => konsole.log(`first: router #${i} succeeded`, n));
-                }
-            )
+            .concatMap((router, i) => {
+                konsole.log(`first: trying router #${i}`);
+                return router
+                    .getRoute(m)
+                    .do(n => konsole.log(`first: router #${i} succeeded`, n));
+            })
             .take(1) // so that we don't keep going through routers after we find one that matches
         );    
     }
@@ -89,20 +142,23 @@ export function first <M extends Routable> (... routersOrHandlers: RouterOrHandl
     return new FirstRouter(... routersOrHandlers);
 }
 
-const minRoute: Route = {
-    score: 0,
-    action: () => console.warn("This should never be called")
-}
-
 export function toScore (score: number) {
     return score == null ? 1 : score;
 }
 
 export class BestRouter <M extends Routable> extends Router<M> {
+    static minRoute: Route = {
+        type: 'action',
+        score: 0,
+        action: () => {
+            console.warn("BestRouter.minRoute.action should never be called");
+        }
+    }
+    
     constructor(... routersOrHandlers: RouterOrHandler<M>[]) {
         const router$ = Observable.from(Router.routersFrom(routersOrHandlers)); 
         super(m => new Observable<Route>(observer => {
-            let bestRoute: Route = minRoute;
+            let bestRoute: Route = BestRouter.minRoute;
 
             const subscription = router$
                 .takeWhile(_ => toScore(bestRoute.score) < 1)
@@ -203,9 +259,11 @@ export class ifMatchesRouter <M extends Routable, N extends Routable> extends Ro
 
         super(m => toObservable(matcher(m))
             .flatMap(n => n
-                ? thenRouter.getRoute(n)
+                ? thenRouter
+                    .getRoute(n)
                     .map(route => routeWithCombinedScore(route, n.score))    
-                : elseRouter.getRoute(m)
+                : elseRouter
+                    .getRoute(m)
             )
         );
     }
@@ -219,45 +277,14 @@ export function ifMatches <M extends Routable, N extends Routable> (
     return new ifMatchesRouter(matcher, thenRouterOrHandler, elseRouterOrHandler);
 }
 
-export class ThrowRouter <M extends Routable> extends Router<M> {
-    constructor(name: string) {
-        super(m => Observable.of({
-            thrown: name,
-            action: () => {
-                console.warn(`A thrown route named ${name} was executed.`);
-            }
-        }));
-    }
-}
-
-export function throwRoute <M extends Routable> (name: string) {
-    return new ThrowRouter(name);
-}
-
-export class CatchRouter <M extends Routable> extends Router<M> {
-    constructor(routerOrHandler: RouterOrHandler<M>, getRouter: (route: Route) => RouterOrHandler<M>) {
-        super(m => Router.from(routerOrHandler)
-            .getRoute(m)
-            .flatMap(route => route.thrown
-                ? Router.from(getRouter(route)).getRoute(m)
-                : Observable.of(route)
-            )
-        );
-    }
-}
-
-export function catchRoute <M extends Routable> (
-    routerOrHandler: RouterOrHandler<M>,
-    getRouter: (route: Route) => RouterOrHandler<M>
-): Router<M> {
-    return new CatchRouter<M>(routerOrHandler, getRouter);
-}
-
 export class BeforeRouter <M extends Routable> extends Router<M> {
     constructor (beforeHandler: Handler<M>, routerOrHandler: RouterOrHandler<M>) {
-        const router = Router.from(routerOrHandler);
-        super(m => router.getRoute(m)
-            .map(route => ({
+        const router = Router
+            .from(routerOrHandler)
+            .catchAbstractRoute(Router.abstractRouteWarning);
+        super(m => router
+            .getRoute(m)
+            .map((route: ActionRoute) => ({
                 ... route,
                 action: () => toObservable(beforeHandler(m))
                     .flatMap(_ => toObservable(route.action()))
@@ -272,9 +299,12 @@ export function before <M extends Routable> (beforeHandler: Handler<M>, routerOr
 
 export class AfterRouter <M extends Routable> extends Router<M> {
     constructor (routerOrHandler: RouterOrHandler<M>, afterHandler: Handler<M>) {
-        const router = Router.from(routerOrHandler);
-        super(m => router.getRoute(m)
-            .map(route => ({
+        const router = Router
+            .from(routerOrHandler)
+            .catchAbstractRoute(Router.abstractRouteWarning);
+        super(m => router
+            .getRoute(m)
+            .map((route: ActionRoute) => ({
                 ... route,
                 action: () => toObservable(route.action())
                     .flatMap(_ => toObservable(afterHandler(m)))
@@ -286,4 +316,3 @@ export class AfterRouter <M extends Routable> extends Router<M> {
 export function after <M extends Routable> (routerOrHandler: RouterOrHandler<M>, afterHandler: Handler<M>) {
     return new AfterRouter(routerOrHandler, afterHandler);
 }
-
