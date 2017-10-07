@@ -121,6 +121,15 @@ export class Router <M extends Routable> {
             .flatMap((route: ActionRoute) => toObservable(route.action()))
             .do(_ => konsole.log("route: called action"));
     }
+
+    doBefore (handler: Handler<M>) {
+        return new BeforeRouter(handler, this);
+    }
+
+    doAfter (handler: Handler<M>) {
+        return new AfterRouter(handler, this);
+    }
+
 }
 
 export class FirstRouter <M extends Routable> extends Router<M> {
@@ -282,6 +291,7 @@ export class BeforeRouter <M extends Routable> extends Router<M> {
         const router = Router
             .from(routerOrHandler)
             .catchAbstractRoute(Router.abstractRouteWarning);
+
         super(m => router
             .getRoute(m)
             .map((route: ActionRoute) => ({
@@ -293,15 +303,12 @@ export class BeforeRouter <M extends Routable> extends Router<M> {
     }
 }
 
-export function before <M extends Routable> (beforeHandler: Handler<M>, routerOrHandler: RouterOrHandler<M>) {
-    return new BeforeRouter(beforeHandler, routerOrHandler);
-}
-
 export class AfterRouter <M extends Routable> extends Router<M> {
-    constructor (routerOrHandler: RouterOrHandler<M>, afterHandler: Handler<M>) {
+    constructor (afterHandler: Handler<M>, routerOrHandler: RouterOrHandler<M>) {
         const router = Router
             .from(routerOrHandler)
             .catchAbstractRoute(Router.abstractRouteWarning);
+
         super(m => router
             .getRoute(m)
             .map((route: ActionRoute) => ({
@@ -311,8 +318,4 @@ export class AfterRouter <M extends Routable> extends Router<M> {
             }))
         );
     }
-}
-
-export function after <M extends Routable> (routerOrHandler: RouterOrHandler<M>, afterHandler: Handler<M>) {
-    return new AfterRouter(routerOrHandler, afterHandler);
 }
