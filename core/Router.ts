@@ -216,18 +216,7 @@ export interface Predicate <M extends Routable = {}> {
     (m: M): Observableable<boolean>;
 }
 
-export function routeWithCombinedScore(route: Route, newScore: number) {
-    const score = toScore(newScore) * toScore(route.score);
-
-    return toScore(route.score) === score
-        ? route
-        : {
-            ... route,
-            score
-        } as Route;
-}
-
-export class ifTrueRouter <M extends Routable> extends Router<M> {
+export class IfTrueRouter <M extends Routable> extends Router<M> {
     constructor (
         predicate: Predicate<M>,
         thenRouterOrHandler: RouterOrHandler<M>,
@@ -249,15 +238,26 @@ export function ifTrue <M extends Routable> (
     predicate: Predicate<M>,
     thenRouterOrHandler: RouterOrHandler<M>,
     elseRouterOrHandler?: RouterOrHandler<M>
-): ifTrueRouter<M> {
-    return new ifTrueRouter(predicate, thenRouterOrHandler, elseRouterOrHandler);
+): IfTrueRouter<M> {
+    return new IfTrueRouter(predicate, thenRouterOrHandler, elseRouterOrHandler);
 }
 
 export interface Matcher <M extends Routable = {}, Z extends Routable = {}> {
     (m: M): Observableable<Z>;
 }
 
-export class ifMatchesRouter <M extends Routable, N extends Routable> extends Router<M> {
+export class IfMatchesRouter <M extends Routable, N extends Routable> extends Router<M> {
+    private static routeWithCombinedScore(route: Route, newScore: number) {
+        const score = toScore(newScore) * toScore(route.score);
+    
+        return toScore(route.score) === score
+            ? route
+            : {
+                ... route,
+                score
+            } as Route;
+    }
+
     constructor (
         matcher: Matcher<M, N>,
         thenRouterOrHandler: RouterOrHandler<N>,
@@ -270,7 +270,7 @@ export class ifMatchesRouter <M extends Routable, N extends Routable> extends Ro
             .flatMap(n => n
                 ? thenRouter
                     .getRoute(n)
-                    .map(route => routeWithCombinedScore(route, n.score))    
+                    .map(route => IfMatchesRouter.routeWithCombinedScore(route, n.score))    
                 : elseRouter
                     .getRoute(m)
             )
@@ -282,8 +282,8 @@ export function ifMatches <M extends Routable, N extends Routable> (
     matcher: Matcher<M, N>,
     thenRouterOrHandler: RouterOrHandler<N>,
     elseRouterOrHandler?: RouterOrHandler<M>
-): ifMatchesRouter<M, N> {
-    return new ifMatchesRouter(matcher, thenRouterOrHandler, elseRouterOrHandler);
+): IfMatchesRouter<M, N> {
+    return new IfMatchesRouter(matcher, thenRouterOrHandler, elseRouterOrHandler);
 }
 
 export class BeforeRouter <M extends Routable> extends Router<M> {
