@@ -156,7 +156,7 @@ export function toScore (score: number) {
 }
 
 export class BestRouter <M extends Routable> extends Router<M> {
-    static minRoute: Route = {
+    private static minRoute: Route = {
         type: 'action',
         score: 0,
         action: () => {
