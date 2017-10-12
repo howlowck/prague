@@ -358,9 +358,7 @@ export class DefaultRouter <M extends Routable> extends Router<M> {
 function ifRegExp <M extends Routable = {} >(regexp: RegExp) {
     const matchRegExp = m => {
         const result = regexp.exec((m as any).request.text);
-        if (!result)
-            return;
-        return {
+        return result && {
             result
         }
     }
