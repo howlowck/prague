@@ -67,43 +67,35 @@ export class Router <M extends Routable> {
             .do(_ => konsole.log("route: called action"));
     }
 
-    doBefore (handler: Handler<M>) {
+    beforeDo (handler: Handler<M>) {
         return new BeforeRouter(handler, this);
     }
 
-    doAfter (handler: Handler<M>) {
+    afterDo (handler: Handler<M>) {
         return new AfterRouter(handler, this);
     }
 
-}
-
-function firstGetRoute <M extends Routable> (routers: Router<M>[]) {
-    return (m: M) => Observable.from(routers)
-        .concatMap((router, i) => {
-            konsole.log(`first: trying router #${i}`);
-            return router
-                .getRoute(m)
-                .do(n => konsole.log(`first: router #${i} succeeded`, n));
-        })
-        .take(1); // so that we don't keep going through routers after we find one that matches
-}
-
-export class FirstElseRouter <M extends Routable> extends Router<M> {
-    constructor (routers: Router<M>[]) {
-        super(firstGetRoute(routers));    
+    defaultDo (handler: Handler<M>) {
+        return new DefaultRouter(this, Router.fromHandler(handler));
     }
+
+    defaultTry (router: Router<M>) {
+        return new DefaultRouter(this, router);
+    }
+
 }
-    
+
 export class FirstRouter <M extends Routable> extends Router<M> {
-    routers: Router<M>[];
-
     constructor (... routers: Router<M>[]) {
-        super(firstGetRoute(routers));    
-        this.routers = routers;
-    }
-
-    elseDo(handler: Handler<M>) {
-        return new FirstElseRouter([ ... this.routers, Router.fromHandler(handler) ])
+        super(m => Observable.from(routers)
+            .concatMap((router, i) => {
+                konsole.log(`first: trying router #${i}`);
+                return router
+                    .getRoute(m)
+                    .do(n => konsole.log(`first: router #${i} succeeded`, n));
+            })
+            .take(1) // so that we don't keep going through routers after we find one that matches);
+        );
     }
 }
 
@@ -339,7 +331,6 @@ export function catchRoute <M extends Routable> (routerOrHandler: RouterOrHandle
 
 export class BeforeRouter <M extends Routable> extends Router<M> {
     constructor (beforeHandler: Handler<M>, router: Router<M>) {
-
         super(m => router
             .getRoute(m)
             .map(route => ({
@@ -353,7 +344,6 @@ export class BeforeRouter <M extends Routable> extends Router<M> {
 
 export class AfterRouter <M extends Routable> extends Router<M> {
     constructor (afterHandler: Handler<M>, router: Router<M>) {
-
         super(m => router
             .getRoute(m)
             .map(route => ({
@@ -361,6 +351,15 @@ export class AfterRouter <M extends Routable> extends Router<M> {
                 action: () => toObservable(route.action())
                     .flatMap(_ => toObservable(afterHandler(m)))
             }))
+        );
+    }
+}
+
+export class DefaultRouter <M extends Routable> extends Router<M> {
+    constructor (mainRouter: Router<M>, defaultRouter: Router<M>) {
+        super(m => Observable.from([mainRouter, defaultRouter])
+            .concatMap(router => router.getRoute(m))
+            .take(1) // so that we don't keep going through routers after we find one that matches);
         );
     }
 }
@@ -391,7 +390,7 @@ ifTrue(c => true).thenTry(
         ifTrue(c => true).thenDo(c => console.log("hi")),
         ifTrue(c => false).thenDo(c => console.log("bye"))
     )
-    .elseDo(c => console.log("huh?"))
+    .defaultDo(c => console.log("huh?"))
 )
 
 ifRegExp(/foo/i)
@@ -405,7 +404,7 @@ ifRegExp(/Go to (.*)/i).thenTry(
         ifTrue(c => false).thenDo(c => console.log("hi")),
         ifTrue(c => false).thenDo(c => console.log("bye"))
     )
-    .elseDo(c => console.log("huh?"))
+    .defaultDo(c => console.log("huh?"))
 )
 
 ifRegExp(/Go to (.*)/i).thenTry(matches =>
@@ -413,5 +412,5 @@ ifRegExp(/Go to (.*)/i).thenTry(matches =>
         ifTrue(c => false).thenDo(c => console.log(`We're going to ${matches[0]}`)),
         ifTrue(c => false).thenDo(c => console.log("bye"))
     )
-    .elseDo(c => console.log("huh?"))
+    .defaultDo(c => console.log("huh?"))
 )
