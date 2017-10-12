@@ -77,23 +77,38 @@ export class Router <M extends Routable> {
 
 }
 
+function firstGetRoute <M extends Routable> (routers: Router<M>[]) {
+    return (m: M) => Observable.from(routers)
+        .concatMap((router, i) => {
+            konsole.log(`first: trying router #${i}`);
+            return router
+                .getRoute(m)
+                .do(n => konsole.log(`first: router #${i} succeeded`, n));
+        })
+        .take(1); // so that we don't keep going through routers after we find one that matches
+}
+
+export class FirstElseRouter <M extends Routable> extends Router<M> {
+    constructor (routers: Router<M>[]) {
+        super(firstGetRoute(routers));    
+    }
+}
+    
 export class FirstRouter <M extends Routable> extends Router<M> {
-    constructor (... routersOrHandlers: RouterOrHandler<M>[]) {
-        const router$ = Observable.from(Router.routersFrom(routersOrHandlers));
-        super(m => router$
-            .concatMap((router, i) => {
-                konsole.log(`first: trying router #${i}`);
-                return router
-                    .getRoute(m)
-                    .do(n => konsole.log(`first: router #${i} succeeded`, n));
-            })
-            .take(1) // so that we don't keep going through routers after we find one that matches
-        );    
+    routers: Router<M>[];
+
+    constructor (... routers: Router<M>[]) {
+        super(firstGetRoute(routers));    
+        this.routers = routers;
+    }
+
+    elseDo(handler: Handler<M>) {
+        return new FirstElseRouter([ ... this.routers, Router.fromHandler(handler) ])
     }
 }
 
-export function first <M extends Routable> (... routersOrHandlers: RouterOrHandler<M>[]) {
-    return new FirstRouter(... routersOrHandlers);
+export function tryInOrder <M extends Routable> (... routers: Router<M>[]) {
+    return new FirstRouter(... routers);
 }
 
 export function toScore (score: number) {
@@ -160,17 +175,14 @@ export interface Predicate <M extends Routable = {}> {
     (m: M): Observableable<boolean>;
 }
 
-export class IfTrueRouter <M extends Routable> extends Router<M> {
-    constructor (
-        predicate: Predicate<M>,
-        thenRouterOrHandler: RouterOrHandler<M>,
-        elseRouterOrHandler?: RouterOrHandler<M>,
+export class IfTrueElse <M extends Routable> extends Router<M> {
+    constructor(
+        private predicate: Predicate<M>,
+        private thenRouter: Router<M>,
+        private elseRouter: Router<M>
     ) {
-        const thenRouter = Router.from(thenRouterOrHandler);
-        const elseRouter = Router.from(elseRouterOrHandler);
-
         super(m => toObservable(predicate(m))
-            .flatMap(n => n
+            .flatMap(result => result
                 ? thenRouter.getRoute(m)
                 : elseRouter.getRoute(m)
             )
@@ -178,12 +190,44 @@ export class IfTrueRouter <M extends Routable> extends Router<M> {
     }
 }
 
+export class IfTrueThen <M extends Routable> extends Router<M> {
+    constructor(
+        private predicate: Predicate<M>,
+        private thenRouter: Router<M>
+    ) {
+        super(m => toFilteredObservable(predicate(m))
+            .flatMap(_ => thenRouter.getRoute(m))
+        );
+    }
+
+    elseDo(handler: Handler<M>) {
+        return new IfTrueElse(this.predicate, this.thenRouter, Router.fromHandler(handler))
+    }
+
+    elseTry(router: Router<M>) {
+        return new IfTrueElse(this.predicate, this.thenRouter, router)
+    }
+}
+
+export class IfTrue <M extends Routable> {
+    constructor (
+        private predicate: Predicate<M>
+    ) {
+    }
+
+    thenDo(handler: Handler<M>) {
+        return new IfTrueThen(this.predicate, Router.fromHandler(handler));
+    }
+
+    thenTry(router: Router<M>) {
+        return new IfTrueThen(this.predicate, router);
+    }
+}
+
 export function ifTrue <M extends Routable> (
-    predicate: Predicate<M>,
-    thenRouterOrHandler: RouterOrHandler<M>,
-    elseRouterOrHandler?: RouterOrHandler<M>
-): IfTrueRouter<M> {
-    return new IfTrueRouter(predicate, thenRouterOrHandler, elseRouterOrHandler);
+    predicate: Predicate<M>
+): IfTrue<M> {
+    return new IfTrue(predicate);
 }
 
 export interface MatcherResult<RESULT = any> {
@@ -191,34 +235,36 @@ export interface MatcherResult<RESULT = any> {
     score?: number;
 }
 
+export interface HandlerWithResult <Z extends Routable = {}, RESULT = any> {
+    (m: Z, r: RESULT): Observableable<any>;
+}
+
 export interface Matcher <M extends Routable = {}, RESULT = any> {
     (m: M): Observableable<MatcherResult<RESULT>>;
 }
 
-export class IfMatchesRouter <M extends Routable, RESULT = any> extends Router<M> {
-    private static routeWithCombinedScore(route: Route, newScore: number) {
-        const score = toScore(newScore) * toScore(route.score);
-    
-        return toScore(route.score) === score
-            ? route
-            : {
-                ... route,
-                score
-            } as Route;
-    }
-    
-    constructor (
-        matcher: Matcher<M, RESULT>,
-        getThenRouterOrHandler: (result: RESULT) => RouterOrHandler<M>,
-        elseRouterOrHandler?: RouterOrHandler<M>
-    ) {
-        const elseRouter = Router.from(elseRouterOrHandler);
+function routeWithCombinedScore(route: Route, newScore: number) {
+    const score = toScore(newScore) * toScore(route.score);
 
+    return toScore(route.score) === score
+        ? route
+        : {
+            ... route,
+            score
+        } as Route;
+}
+
+export class IfMatchesElse <M extends Routable, RESULT = any> extends Router<M> {
+    constructor(
+        private matcher: Matcher<M, RESULT>,
+        private getRouter: (result: RESULT) => Router<M>,
+        private elseRouter: Router<M>
+    ) {
         super(m => toObservable(matcher(m))
             .flatMap(matcherResult => matcherResult
-                ? Router.from(getThenRouterOrHandler(matcherResult.result))
+                ? getRouter(matcherResult.result)
                     .getRoute(m)
-                    .map(route => IfMatchesRouter.routeWithCombinedScore(route, matcherResult.score))    
+                    .map(route => routeWithCombinedScore(route, matcherResult.score))    
                 : elseRouter
                     .getRoute(m)
             )
@@ -226,12 +272,52 @@ export class IfMatchesRouter <M extends Routable, RESULT = any> extends Router<M
     }
 }
 
+export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> {
+    constructor(
+        private matcher: Matcher<M, RESULT>,
+        private getRouter: (result: RESULT) => Router<M>
+    ) {
+        super(m => toFilteredObservable(matcher(m))
+            .flatMap(matcherResult => getRouter(matcherResult.result)
+                .getRoute(m)
+                .map(route => routeWithCombinedScore(route, matcherResult.score))
+            )
+        );
+    }
+
+    elseDo(handler: Handler<M>) {
+        return new IfMatchesElse(this.matcher, this.getRouter, Router.fromHandler(handler))
+    }
+
+    elseTry(router: Router<M>) {
+        return new IfMatchesElse(this.matcher, this.getRouter, router)
+    }
+}
+
+export class IfMatches <M extends Routable, RESULT = any> {
+    constructor (
+        private matcher: Matcher<M, RESULT>
+    ) {
+    }
+
+    thenDo(handlerWithResult: HandlerWithResult<M, RESULT>) {
+        return new IfMatchesThen(this.matcher, result => Router.fromHandler(m => handlerWithResult(m, result)));
+    }
+
+    thenTry(router: Router<M>): IfMatchesThen<M, RESULT>;
+    thenTry(getRouter: (result: RESULT) => Router<M>): IfMatchesThen<M, RESULT>;
+    thenTry(arg) {
+        return new IfMatchesThen(this.matcher, typeof arg !== 'function'
+            ? result => arg
+            : arg
+        );
+    }
+}
+
 export function ifMatches <M extends Routable, RESULT = any> (
-    matcher: Matcher<M, RESULT>,
-    getThenRouterOrHandler: (result: RESULT) => RouterOrHandler<M>,
-    elseRouterOrHandler?: RouterOrHandler<M>
-): IfMatchesRouter<M, RESULT> {
-    return new IfMatchesRouter(matcher, getThenRouterOrHandler, elseRouterOrHandler);
+    matcher: Matcher<M, RESULT>
+): IfMatches<M, RESULT> {
+    return new IfMatches(matcher);
 }
 
 const thrownRoute: Route = {
@@ -252,8 +338,7 @@ export function catchRoute <M extends Routable> (routerOrHandler: RouterOrHandle
 }
 
 export class BeforeRouter <M extends Routable> extends Router<M> {
-    constructor (beforeHandler: Handler<M>, routerOrHandler: RouterOrHandler<M>) {
-        const router = Router.from(routerOrHandler);
+    constructor (beforeHandler: Handler<M>, router: Router<M>) {
 
         super(m => router
             .getRoute(m)
@@ -267,8 +352,7 @@ export class BeforeRouter <M extends Routable> extends Router<M> {
 }
 
 export class AfterRouter <M extends Routable> extends Router<M> {
-    constructor (afterHandler: Handler<M>, routerOrHandler: RouterOrHandler<M>) {
-        const router = Router.from(routerOrHandler);
+    constructor (afterHandler: Handler<M>, router: Router<M>) {
 
         super(m => router
             .getRoute(m)
@@ -280,3 +364,54 @@ export class AfterRouter <M extends Routable> extends Router<M> {
         );
     }
 }
+
+// Sample code
+
+function ifRegExp <M extends Routable = {} >(regexp: RegExp) {
+    const matchRegExp = m => {
+        const result = regexp.exec((m as any).request.text);
+        if (!result)
+            return;
+        return {
+            result
+        }
+    }
+
+    return new IfMatches<M, RegExpExecArray>(matchRegExp);
+}
+
+ifTrue(c => true)
+    .thenDo(c => console.log("true"))
+    .elseTry(
+        ifTrue(c => true).thenDo(c => console.log("false"))
+    )
+
+ifTrue(c => true).thenTry(
+    tryInOrder(
+        ifTrue(c => true).thenDo(c => console.log("hi")),
+        ifTrue(c => false).thenDo(c => console.log("bye"))
+    )
+    .elseDo(c => console.log("huh?"))
+)
+
+ifRegExp(/foo/i)
+    .thenDo(c => console.log("matches!"))
+
+ifRegExp(/Go to (.*)/i)
+    .thenDo((c, matches) => console.log(`Let's go to ${matches[0]}`))
+
+ifRegExp(/Go to (.*)/i).thenTry(
+    tryInOrder(
+        ifTrue(c => false).thenDo(c => console.log("hi")),
+        ifTrue(c => false).thenDo(c => console.log("bye"))
+    )
+    .elseDo(c => console.log("huh?"))
+)
+
+ifRegExp(/Go to (.*)/i).thenTry(matches =>
+    tryInOrder(
+        ifTrue(c => false).thenDo(c => console.log(`We're going to ${matches[0]}`)),
+        ifTrue(c => false).thenDo(c => console.log("bye"))
+    )
+    .elseDo(c => console.log("huh?"))
+)
