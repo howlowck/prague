@@ -33,12 +33,10 @@ export interface Handler <Z extends Routable = {}> {
     (m: Z): Observableable<any>;
 }
 
-export type RouterOrHandler <M extends Routable = {}> = Router<M> | Handler<M>;
-
 export class Router <M extends Routable> {
     constructor(public getRoute: (m: M) => Observable<Route>) {}
 
-    static fromHandler <M extends Routable> (handler: Handler<M>) {
+    static do <M extends Routable> (handler: Handler<M>) {
         return new Router<M>(m => Observable.of({
             action: () => handler(m)
         } as Route));
@@ -46,19 +44,6 @@ export class Router <M extends Routable> {
     
     static null = new Router<any>(m => Observable.empty());
 
-    static from <M extends Routable> (routerOrHandler: RouterOrHandler<M>): Router<M> {
-        return routerOrHandler
-            ? routerOrHandler instanceof Router
-                ? routerOrHandler
-                : Router.fromHandler(routerOrHandler)
-            : Router.null;
-    }
-
-    static routersFrom <M extends Routable> (routersOrHandlers: RouterOrHandler<M>[]) {
-        return routersOrHandlers
-            .map(routerOrHandler => Router.from(routerOrHandler));
-    }
-    
     route (m: M) {
         return this
             .getRoute(m)
@@ -68,19 +53,19 @@ export class Router <M extends Routable> {
     }
 
     beforeDo (handler: Handler<M>) {
-        return new BeforeRouter(handler, this);
+        return new BeforeRouter<M>(handler, this);
     }
 
     afterDo (handler: Handler<M>) {
-        return new AfterRouter(handler, this);
+        return new AfterRouter<M>(handler, this);
     }
 
     defaultDo (handler: Handler<M>) {
-        return new DefaultRouter(this, Router.fromHandler(handler));
+        return new DefaultRouter<M>(this, Router.do(handler));
     }
 
     defaultTry (router: Router<M>) {
-        return new DefaultRouter(this, router);
+        return new DefaultRouter<M>(this, router);
     }
 
 }
@@ -107,6 +92,7 @@ export function toScore (score: number) {
     return score == null ? 1 : score;
 }
 
+/*
 export class BestRouter <M extends Routable> extends Router<M> {
     private static minRoute: Route = {
         score: 0,
@@ -150,6 +136,7 @@ export class BestRouter <M extends Routable> extends Router<M> {
 export function best <M extends Routable> (... routersOrHandlers: RouterOrHandler<M>[]) {
     return new BestRouter(... routersOrHandlers);
 }
+*/
 
 export class RunRouter <M extends Routable> extends Router<M> {
     constructor(handler: Handler<M>) {
@@ -193,7 +180,7 @@ export class IfTrueThen <M extends Routable> extends Router<M> {
     }
 
     elseDo(handler: Handler<M>) {
-        return new IfTrueElse(this.predicate, this.thenRouter, Router.fromHandler(handler))
+        return new IfTrueElse(this.predicate, this.thenRouter, Router.do(handler))
     }
 
     elseTry(router: Router<M>) {
@@ -208,7 +195,7 @@ export class IfTrue <M extends Routable> {
     }
 
     thenDo(handler: Handler<M>) {
-        return new IfTrueThen(this.predicate, Router.fromHandler(handler));
+        return new IfTrueThen(this.predicate, Router.do(handler));
     }
 
     thenTry(router: Router<M>) {
@@ -278,7 +265,7 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
     }
 
     elseDo(handler: Handler<M>) {
-        return new IfMatchesElse(this.matcher, this.getRouter, Router.fromHandler(handler))
+        return new IfMatchesElse(this.matcher, this.getRouter, Router.do(handler))
     }
 
     elseTry(router: Router<M>) {
@@ -293,7 +280,7 @@ export class IfMatches <M extends Routable, RESULT = any> {
     }
 
     thenDo(handlerWithResult: HandlerWithResult<M, RESULT>) {
-        return new IfMatchesThen(this.matcher, result => Router.fromHandler(m => handlerWithResult(m, result)));
+        return new IfMatchesThen(this.matcher, result => Router.do(m => handlerWithResult(m, result)));
     }
 
     thenTry(router: Router<M>): IfMatchesThen<M, RESULT>;
@@ -312,6 +299,7 @@ export function ifMatches <M extends Routable, RESULT = any> (
     return new IfMatches(matcher);
 }
 
+/*
 const thrownRoute: Route = {
     thrown: true,
     action: () => {}
@@ -328,6 +316,7 @@ export function catchRoute <M extends Routable> (routerOrHandler: RouterOrHandle
         .filter(route => !route.thrown)
     );
 }
+*/
 
 export class BeforeRouter <M extends Routable> extends Router<M> {
     constructor (beforeHandler: Handler<M>, router: Router<M>) {
@@ -379,7 +368,9 @@ function ifRegExp <M extends Routable = {} >(regexp: RegExp) {
     return new IfMatches<M, RegExpExecArray>(matchRegExp);
 }
 
-ifTrue(c => true)
+const handler: Handler = m => console.log("foo");
+
+const myRouter = ifTrue(c => true)
     .thenDo(c => console.log("true"))
     .elseTry(
         ifTrue(c => true).thenDo(c => console.log("false"))
