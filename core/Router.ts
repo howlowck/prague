@@ -368,9 +368,7 @@ function ifRegExp <M extends Routable = {} >(regexp: RegExp) {
     return new IfMatches<M, RegExpExecArray>(matchRegExp);
 }
 
-const handler: Handler = m => console.log("foo");
-
-const myRouter = ifTrue(c => true)
+ifTrue(c => true)
     .thenDo(c => console.log("true"))
     .elseTry(
         ifTrue(c => true).thenDo(c => console.log("false"))
