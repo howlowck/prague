@@ -215,7 +215,7 @@ export interface MatcherResult<RESULT = any> {
 }
 
 export interface HandlerWithResult <Z extends Routable = {}, RESULT = any> {
-    (m: Z, r: RESULT): Observableable<any>;
+    (m: Z, r?: RESULT): Observableable<any>;
 }
 
 export interface Matcher <M extends Routable = {}, RESULT = any> {
