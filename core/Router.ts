@@ -179,12 +179,12 @@ export class IfTrueThen <M extends Routable> extends Router<M> {
         );
     }
 
-    elseDo(handler: Handler<M>) {
-        return new IfTrueElse(this.predicate, this.thenRouter, Router.do(handler))
+    elseDo(elseHandler: Handler<M>) {
+        return this.elseTry(Router.do(elseHandler));
     }
 
-    elseTry(router: Router<M>) {
-        return new IfTrueElse(this.predicate, this.thenRouter, router)
+    elseTry(elseRouter: Router<M>) {
+        return new IfTrueElse(this.predicate, this.thenRouter, elseRouter)
     }
 }
 
@@ -194,12 +194,12 @@ export class IfTrue <M extends Routable> {
     ) {
     }
 
-    thenDo(handler: Handler<M>) {
-        return new IfTrueThen(this.predicate, Router.do(handler));
+    thenDo(thenHandler: Handler<M>) {
+        return this.thenTry(Router.do(thenHandler));
     }
 
-    thenTry(router: Router<M>) {
-        return new IfTrueThen(this.predicate, router);
+    thenTry(thenRouter: Router<M>) {
+        return new IfTrueThen(this.predicate, thenRouter);
     }
 }
 
@@ -236,12 +236,12 @@ function routeWithCombinedScore(route: Route, newScore: number) {
 export class IfMatchesElse <M extends Routable, RESULT = any> extends Router<M> {
     constructor(
         private matcher: Matcher<M, RESULT>,
-        private getRouter: (result: RESULT) => Router<M>,
+        private getThenRouter: (result: RESULT) => Router<M>,
         private elseRouter: Router<M>
     ) {
         super(m => toObservable(matcher(m))
             .flatMap(matcherResult => matcherResult
-                ? getRouter(matcherResult.result)
+                ? getThenRouter(matcherResult.result)
                     .getRoute(m)
                     .map(route => routeWithCombinedScore(route, matcherResult.score))    
                 : elseRouter
@@ -254,22 +254,22 @@ export class IfMatchesElse <M extends Routable, RESULT = any> extends Router<M> 
 export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> {
     constructor(
         private matcher: Matcher<M, RESULT>,
-        private getRouter: (result: RESULT) => Router<M>
+        private getThenRouter: (result: RESULT) => Router<M>
     ) {
         super(m => toFilteredObservable(matcher(m))
-            .flatMap(matcherResult => getRouter(matcherResult.result)
+            .flatMap(matcherResult => getThenRouter(matcherResult.result)
                 .getRoute(m)
                 .map(route => routeWithCombinedScore(route, matcherResult.score))
             )
         );
     }
 
-    elseDo(handler: Handler<M>) {
-        return new IfMatchesElse(this.matcher, this.getRouter, Router.do(handler))
+    elseDo(elseHandler: Handler<M>) {
+        return this.elseTry(Router.do(elseHandler))
     }
 
-    elseTry(router: Router<M>) {
-        return new IfMatchesElse(this.matcher, this.getRouter, router)
+    elseTry(elseRouter: Router<M>) {
+        return new IfMatchesElse(this.matcher, this.getThenRouter, elseRouter)
     }
 }
 
@@ -279,16 +279,24 @@ export class IfMatches <M extends Routable, RESULT = any> {
     ) {
     }
 
-    thenDo(handlerWithResult: HandlerWithResult<M, RESULT>) {
-        return new IfMatchesThen(this.matcher, result => Router.do(m => handlerWithResult(m, result)));
+    and(predicate: (m: M, result: RESULT) => Observableable<boolean>) {
+        return new IfMatches<M, RESULT>(m => toFilteredObservable(this.matcher(m))
+            .flatMap(matcherResult => toFilteredObservable(predicate(m, matcherResult.result))
+                .map(_ => matcherResult)
+            )
+        );
+    }
+
+    thenDo(thenHandler: HandlerWithResult<M, RESULT>) {
+        return this.thenTry(result => Router.do<M>(m => thenHandler(m, result)));
     }
 
     thenTry(router: Router<M>): IfMatchesThen<M, RESULT>;
     thenTry(getRouter: (result: RESULT) => Router<M>): IfMatchesThen<M, RESULT>;
     thenTry(arg) {
-        return new IfMatchesThen(this.matcher, typeof arg !== 'function'
-            ? result => arg
-            : arg
+        return new IfMatchesThen(this.matcher, typeof arg === 'function'
+            ? arg
+            : result => arg
         );
     }
 }
@@ -353,9 +361,106 @@ export class DefaultRouter <M extends Routable> extends Router<M> {
     }
 }
 
+class NamedRouter <ARGS extends object = any, M extends object = any> {
+    constructor(
+        name: string,
+        public getRouter: (args?: ARGS) => Router<M>,
+        redefine = false
+    ) {
+        // add the router to the registry.
+        // if name already exists and redefine is false, throw (or log) an error
+    }
+}
+
+interface PromptArgs<WITHARGS> {
+    withArgs: WITHARGS;
+    turn: number;
+}
+
+interface PromptThenArgs<RESULT, WITHARGS> extends PromptArgs<WITHARGS> {
+    result: RESULT;
+}
+
+interface PromptElseArgs<WITHARGS> extends PromptArgs<WITHARGS>{
+}
+
+class PromptThen <RESULT = any, WITHARGS extends object = any, M extends object = any> extends NamedRouter<PromptArgs<WITHARGS>, M> {
+    constructor(
+        private name: string,
+        private ifMatches: IfMatches<M, RESULT>,
+        private getThenRouter: (promptThenArgs: PromptThenArgs<RESULT, WITHARGS>) => Router<M>
+    ) {
+        super (name,
+            promptArgs => ifMatches
+                .thenTry(result => getThenRouter({
+                    ... promptArgs,
+                    result
+                }))
+                .elseTry(this.defaultPromptElseRouter(promptArgs))
+        );
+    }
+
+    private defaultPromptElseRouter(promptArgs: PromptArgs<WITHARGS>): Router<M> {
+        // default retry logic goes here
+        return Router.do(c => console.log("I should probably retry or something"));
+    }
+
+    elseDo(promptElseHandler: HandlerWithResult<M, PromptElseArgs<WITHARGS>>) {
+        return this.elseTry(promptArgs => Router.do(m => promptElseHandler(m, promptArgs)));
+    }
+
+    elseTry(promptElseRouter: Router<M>): NamedRouter<PromptArgs<WITHARGS>, M>;        
+    elseTry(getPromptElseRouter: (promptArgs: PromptArgs<WITHARGS>) => Router<M>): NamedRouter<PromptArgs<WITHARGS>, M>;
+    elseTry(arg) {
+        const getPromptElseRouter = typeof(arg) === 'function'
+            ? arg
+            : (promptArgs: PromptArgs<WITHARGS>) => arg;
+
+        return new NamedRouter<PromptArgs<WITHARGS>, M>(this.name,
+            promptArgs => this.ifMatches
+                .thenTry(result => this.getThenRouter({
+                    ... promptArgs,
+                    result
+                }))
+                .elseTry(getPromptElseRouter(promptArgs)),
+            true
+        );
+    }
+}
+    
+class Prompt <WITHARGS extends object = any, RESULT = any, M extends object = any> {
+    constructor(
+        private name: string,
+        private ifMatches: IfMatches<M, RESULT>
+    ) {
+    }
+
+    thenDo(promptThenHandler: HandlerWithResult<M, PromptThenArgs<RESULT, WITHARGS>>) {
+        return new PromptThen<RESULT, WITHARGS, M>(this.name, this.ifMatches, promptArgs => Router.do(m => promptThenHandler(m, promptArgs))); 
+    }
+
+    thenTry(promptThenRouter: Router<M>): PromptThen<RESULT, WITHARGS, M>;
+    thenTry(getPromptThenRouter: (promptThenArgs: PromptThenArgs<RESULT, WITHARGS>) => Router<M>): PromptThen<RESULT, WITHARGS, M>;
+    thenTry(arg) {
+        return new PromptThen<RESULT, WITHARGS, M>(this.name, this.ifMatches, typeof arg === 'function'
+            ? arg
+            : result => arg
+        );
+    }
+}
+
+
 // Sample code
 
-function ifRegExp <M extends Routable = {} >(regexp: RegExp) {
+interface BotContext {
+    request: { type: string, text: string }
+    state: { conversation: any }
+    reply: (text: string) => {};
+}
+
+// ifMatches functions
+
+function ifRegExp <M extends Routable = {}>(regexp: RegExp) {
     const matchRegExp = m => {
         const result = regexp.exec((m as any).request.text);
         return result && {
@@ -365,6 +470,15 @@ function ifRegExp <M extends Routable = {} >(regexp: RegExp) {
 
     return new IfMatches<M, RegExpExecArray>(matchRegExp);
 }
+
+const ifText = new IfMatches<BotContext, string>(c =>
+    c.request.type === 'message' && c.request.text.length > 0 && {
+        result: c.request.text
+    }
+);
+
+
+// Routers
 
 ifTrue(c => true)
     .thenDo(c => console.log("true"))
@@ -401,3 +515,21 @@ ifRegExp(/Go to (.*)/i).thenTry(matches =>
     )
     .defaultDo(c => console.log("huh?"))
 )
+
+// Refining an ifMatches function by adding constraints
+
+const ifBillish = ifRegExp(/I am (.*)/).and((c, matches) => /Bill|Billy|William|Will|Willy/.test(matches[0]));
+
+const ifUsername = ifText.and((c, text) => text.length > 5 && text.length < 20);
+
+// create a prompt
+
+const getUsername = new Prompt('username', ifUsername)
+    .thenDo((c, prompt) => {
+        c.state.conversation.username = prompt.result;
+    })
+    // 'else' handler is optional - if present overrides the default handler
+    .elseDo((c, prompt) => {
+        c.reply("Usernames need to be the right length and stuff.");
+        // then push it back on to the stack or whatever
+    })
