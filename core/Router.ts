@@ -29,7 +29,7 @@ export interface Route {
 
 export type Routable  = object;
 
-export interface Handler <Z extends Routable = {}> {
+export interface Handler <Z extends Routable> {
     (m: Z): Observableable<any>;
 }
 
@@ -61,7 +61,7 @@ export class Router <M extends Routable> {
     }
 
     defaultDo (handler: Handler<M>) {
-        return new DefaultRouter<M>(this, Router.do(handler));
+        return this.defaultTry(Router.do(handler));
     }
 
     defaultTry (router: Router<M>) {
@@ -150,7 +150,7 @@ export function run <M extends Routable> (handler: Handler<M>) {
     return new RunRouter(handler);
 }
 
-export interface Predicate <M extends Routable = {}> {
+export interface Predicate <M extends Routable> {
     (m: M): Observableable<boolean>;
 }
 
@@ -209,21 +209,29 @@ export function ifTrue <M extends Routable> (
     return new IfTrue(predicate);
 }
 
-export interface MatcherResult<RESULT = any> {
+export interface Matcher <M extends Routable, RESULT> {
+    (m: M): Observableable<MatcherResult<RESULT>>;
+}
+
+export interface MatcherResult<RESULT> {
     result: RESULT;
     score?: number;
 }
 
-export interface HandlerWithResult <Z extends Routable = {}, RESULT = any> {
+export interface HandlerWithResult <Z extends Routable, RESULT> {
     (m: Z, r: RESULT): Observableable<any>;
 }
 
-export interface Matcher <M extends Routable = {}, RESULT = any> {
-    (m: M): Observableable<MatcherResult<RESULT>>;
+export interface Recognizer<M extends Routable, RECOGNIZERARGS, RESULT> {
+    (recognizerArgs?: RECOGNIZERARGS): IfMatches<M, RESULT>
+}
+
+function combineScore(score, otherScore) {
+    return score * otherScore
 }
 
 function routeWithCombinedScore(route: Route, newScore: number) {
-    const score = toScore(newScore) * toScore(route.score);
+    const score = combineScore(toScore(newScore), toScore(route.score));
 
     return toScore(route.score) === score
         ? route
@@ -233,7 +241,7 @@ function routeWithCombinedScore(route: Route, newScore: number) {
         } as Route;
 }
 
-export class IfMatchesElse <M extends Routable, RESULT = any> extends Router<M> {
+export class IfMatchesElse <M extends Routable, RESULT> extends Router<M> {
     constructor(
         private matcher: Matcher<M, RESULT>,
         private getThenRouter: (result: RESULT) => Router<M>,
@@ -273,7 +281,7 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
     }
 }
 
-export class IfMatches <M extends Routable, RESULT = any> {
+export class IfMatches <M extends Routable, RESULT> {
     constructor (
         private matcher: Matcher<M, RESULT>
     ) {
@@ -283,6 +291,17 @@ export class IfMatches <M extends Routable, RESULT = any> {
         return new IfMatches<M, RESULT>(m => toFilteredObservable(this.matcher(m))
             .flatMap(matcherResult => toFilteredObservable(predicate(m, matcherResult.result))
                 .map(_ => matcherResult)
+            )
+        );
+    }
+
+    andTransform <NEXTRESULT> (transformer: (c: M, result: RESULT) => Observableable<MatcherResult<NEXTRESULT>>) {
+        return new IfMatches<M, NEXTRESULT>(m => toFilteredObservable(this.matcher(m))
+            .flatMap(matcherResult => toFilteredObservable(transformer(m, matcherResult.result))
+                .map(nextMatcherResult => ({
+                    result: nextMatcherResult.result,
+                    score: combineScore(toScore(matcherResult.score), toScore(nextMatcherResult.score))
+                }))
             )
         );
     }
@@ -299,12 +318,6 @@ export class IfMatches <M extends Routable, RESULT = any> {
             : result => arg
         );
     }
-}
-
-export function ifMatches <M extends Routable, RESULT = any> (
-    matcher: Matcher<M, RESULT>
-): IfMatches<M, RESULT> {
-    return new IfMatches(matcher);
 }
 
 /*
@@ -372,26 +385,27 @@ class NamedRouter <ARGS extends object = any, M extends object = any> {
     }
 }
 
-interface PromptArgs<WITHARGS> {
+interface PromptArgs<WITHARGS, RECOGNIZERARGS> {
+    recognizerArgs: RECOGNIZERARGS;
     withArgs: WITHARGS;
     turn: number;
 }
 
-interface PromptThenArgs<RESULT, WITHARGS> extends PromptArgs<WITHARGS> {
+interface PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
     result: RESULT;
 }
 
-interface PromptElseArgs<WITHARGS> extends PromptArgs<WITHARGS>{
+interface PromptElseArgs<WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
 }
 
-class PromptThen <RESULT = any, WITHARGS extends object = any, M extends object = any> extends NamedRouter<PromptArgs<WITHARGS>, M> {
+class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M> {
     constructor(
         private name: string,
-        private ifMatches: IfMatches<M, RESULT>,
-        private getThenRouter: (promptThenArgs: PromptThenArgs<RESULT, WITHARGS>) => Router<M>
+        private recognizer: Recognizer<M, RECOGNIZERARGS, RESULT>,
+        private getThenRouter: (promptThenArgs: PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS>) => Router<M>
     ) {
         super (name,
-            promptArgs => ifMatches
+            promptArgs => recognizer(promptArgs.recognizerArgs)
                 .thenTry(result => getThenRouter({
                     ... promptArgs,
                     result
@@ -400,24 +414,24 @@ class PromptThen <RESULT = any, WITHARGS extends object = any, M extends object 
         );
     }
 
-    private defaultPromptElseRouter(promptArgs: PromptArgs<WITHARGS>): Router<M> {
+    private defaultPromptElseRouter(promptArgs: PromptArgs<WITHARGS, RECOGNIZERARGS>): Router<M> {
         // default retry logic goes here
         return Router.do(c => console.log("I should probably retry or something"));
     }
 
-    elseDo(promptElseHandler: HandlerWithResult<M, PromptElseArgs<WITHARGS>>) {
+    elseDo(promptElseHandler: HandlerWithResult<M, PromptElseArgs<WITHARGS, RECOGNIZERARGS>>) {
         return this.elseTry(promptArgs => Router.do(m => promptElseHandler(m, promptArgs)));
     }
 
-    elseTry(promptElseRouter: Router<M>): NamedRouter<PromptArgs<WITHARGS>, M>;        
-    elseTry(getPromptElseRouter: (promptArgs: PromptArgs<WITHARGS>) => Router<M>): NamedRouter<PromptArgs<WITHARGS>, M>;
+    elseTry(promptElseRouter: Router<M>): NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M>;        
+    elseTry(getPromptElseRouter: (promptArgs: PromptArgs<WITHARGS, RECOGNIZERARGS>) => Router<M>): NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M>;
     elseTry(arg) {
         const getPromptElseRouter = typeof(arg) === 'function'
             ? arg
-            : (promptArgs: PromptArgs<WITHARGS>) => arg;
+            : (promptArgs: PromptArgs<WITHARGS, RECOGNIZERARGS>) => arg;
 
-        return new NamedRouter<PromptArgs<WITHARGS>, M>(this.name,
-            promptArgs => this.ifMatches
+        return new NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M>(this.name,
+            promptArgs => this.recognizer(promptArgs.recognizerArgs)
                 .thenTry(result => this.getThenRouter({
                     ... promptArgs,
                     result
@@ -427,64 +441,101 @@ class PromptThen <RESULT = any, WITHARGS extends object = any, M extends object 
         );
     }
 }
-    
-class Prompt <WITHARGS extends object = any, RESULT = any, M extends object = any> {
+
+class PromptRecognizer <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> {
     constructor(
         private name: string,
-        private ifMatches: IfMatches<M, RESULT>
+        private recognizer: Recognizer<M, RECOGNIZERARGS, RESULT>
     ) {
     }
 
-    thenDo(promptThenHandler: HandlerWithResult<M, PromptThenArgs<RESULT, WITHARGS>>) {
-        return new PromptThen<RESULT, WITHARGS, M>(this.name, this.ifMatches, promptArgs => Router.do(m => promptThenHandler(m, promptArgs))); 
+    thenDo(promptThenHandler: HandlerWithResult<M, PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS>>) {
+        return new PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>(this.name, this.recognizer, promptArgs => Router.do(m => promptThenHandler(m, promptArgs))); 
     }
 
-    thenTry(promptThenRouter: Router<M>): PromptThen<RESULT, WITHARGS, M>;
-    thenTry(getPromptThenRouter: (promptThenArgs: PromptThenArgs<RESULT, WITHARGS>) => Router<M>): PromptThen<RESULT, WITHARGS, M>;
+    thenTry(promptThenRouter: Router<M>): PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>;
+    thenTry(getPromptThenRouter: (promptThenArgs: PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS>) => Router<M>): PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>;
     thenTry(arg) {
-        return new PromptThen<RESULT, WITHARGS, M>(this.name, this.ifMatches, typeof arg === 'function'
+        return new PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>(this.name, this.recognizer, typeof arg === 'function'
             ? arg
             : result => arg
         );
     }
 }
 
+class Prompt <WITHARGS extends object = any, M extends object = any> {
+    constructor(
+        private name: string,
+    ) {
+    }
+
+    validate <ARG, RESULT> (recognizer: Recognizer<M, ARG, RESULT>) {
+        return new PromptRecognizer<WITHARGS, ARG, RESULT, M>(this.name, recognizer);
+    }
+}
+
 
 // Sample code
 
-interface BotContext {
+interface BotContext extends Routable {
     request: { type: string, text: string }
     state: { conversation: any }
     reply: (text: string) => {};
 }
 
-// ifMatches functions
+// Recognizers
 
-function ifRegExp <M extends Routable = {}>(regexp: RegExp) {
-    const matchRegExp = m => {
-        const result = regexp.exec((m as any).request.text);
-        return result && {
-            result
-        }
-    }
-
-    return new IfMatches<M, RegExpExecArray>(matchRegExp);
-}
-
-const ifText = new IfMatches<BotContext, string>(c =>
+const ifText = () => new IfMatches<BotContext, string>(c =>
     c.request.type === 'message' && c.request.text.length > 0 && {
         result: c.request.text
     }
 );
 
+const ifRegExp = (regexp: RegExp) => ifText()
+    .andTransform((c, text) => {
+        const result = regexp.exec(text);
+        return result && {
+            result
+        }
+    });
+
+const ifNames = (regexp: RegExp) => ifRegExp(/I am (.*)/)
+    .and((c, matches) => regexp.test(matches[0]));
+
+const ifBillish = () => ifNames(/Bill|Billy|William|Will|Willy/);
+
+
+const ifChoice = (choices: string[]) => ifText()
+    .andTransform((c, text) => {
+        const choice = choices.find(choice => choice.toLowerCase() === text.toLowerCase());
+        return choice && {
+            result: choice
+        }
+    });
+
+const parseDate = (text: string) => {
+    // stub - real function would return undefined or parsed date
+    return new Date();
+}
+
+const ifTime = () => ifText()
+    .andTransform((c, text) => {
+        const result = parseDate(text);
+        return result && {
+            result
+        }
+    // validate text and turn it into a Date
+    });
 
 // Routers
+
+let r: Router<BotContext>;
 
 ifTrue(c => true)
     .thenDo(c => console.log("true"))
     .elseTry(
         ifTrue(c => true).thenDo(c => console.log("false"))
-    )
+    );
 
 ifTrue(c => true).thenTry(
     tryInOrder(
@@ -492,39 +543,37 @@ ifTrue(c => true).thenTry(
         ifTrue(c => false).thenDo(c => console.log("bye"))
     )
     .defaultDo(c => console.log("huh?"))
-)
+);
 
 ifRegExp(/foo/i)
-    .thenDo(c => console.log("matches!"))
+    .thenDo(c => console.log("matches!"));
 
 ifRegExp(/Go to (.*)/i)
-    .thenDo((c, matches) => console.log(`Let's go to ${matches[0]}`))
+    .thenDo((c, matches) => console.log(`Let's go to ${matches[0]}`));
 
 ifRegExp(/Go to (.*)/i).thenTry(
     tryInOrder(
-        ifTrue(c => false).thenDo(c => console.log("hi")),
-        ifTrue(c => false).thenDo(c => console.log("bye"))
+        ifTrue<BotContext>(c => false).thenDo(c => console.log("hi")),
+        ifTrue<BotContext>(c => false).thenDo(c => console.log("bye"))
     )
     .defaultDo(c => console.log("huh?"))
-)
+);
 
 ifRegExp(/Go to (.*)/i).thenTry(matches =>
     tryInOrder(
-        ifTrue(c => false).thenDo(c => console.log(`We're going to ${matches[0]}`)),
-        ifTrue(c => false).thenDo(c => console.log("bye"))
+        ifTrue<BotContext>(c => false).thenDo(c => console.log(`We're going to ${matches[0]}`)),
+        ifTrue<BotContext>(c => false).thenDo(c => console.log("bye"))
     )
     .defaultDo(c => console.log("huh?"))
-)
+);
 
-// Refining an ifMatches function by adding constraints
+// create a prompt using a custom recognizer
 
-const ifBillish = ifRegExp(/I am (.*)/).and((c, matches) => /Bill|Billy|William|Will|Willy/.test(matches[0]));
+const ifUsername = () => ifText()
+    .and((c, text) => text.length > 5 && text.length < 20);
 
-const ifUsername = ifText.and((c, text) => text.length > 5 && text.length < 20);
-
-// create a prompt
-
-const getUsername = new Prompt('username', ifUsername)
+const getUsername = new Prompt('username')
+    .validate(ifUsername)
     .thenDo((c, prompt) => {
         c.state.conversation.username = prompt.result;
     })
@@ -533,3 +582,100 @@ const getUsername = new Prompt('username', ifUsername)
         c.reply("Usernames need to be the right length and stuff.");
         // then push it back on to the stack or whatever
     })
+
+// dynamic prompt args
+
+const getThing = new Prompt('thing')
+    .validate(ifRegExp)
+    .thenDo((c, matches) => c.reply("Yo"));
+
+interface Alarm {
+    title: string;
+    time: Date;
+}
+
+const setAlarmController = (c: BotContext, alarmStuff: Alarm) => {
+    if (!alarmStuff.title) {
+        // call getTitle with alarmStuff
+        return;
+    }
+
+    if (!alarmStuff.time) {
+        // call getTime with alarmStuff
+        return;
+    }
+
+    // then get the time if we don't have it
+    // then set the alarm
+}
+
+const getTitle = new Prompt<Alarm>('title')
+    .validate(ifText)
+    .thenDo((c, prompt) => {
+        setAlarmController(c, {
+            ... prompt.withArgs,
+            title: prompt.result
+        });
+    })
+    .elseDo((c, prompt) => {
+    
+    })
+
+
+
+const getTime = new Prompt<Alarm>('title')
+    .validate(ifTime)
+    .thenDo((c, prompt) => {
+        setAlarmController(c, {
+            ... prompt.withArgs,
+            time: prompt.result
+        });
+    });
+
+const flavors = ["chocolate", "vanilla", "strawberry"];
+
+const getFlavor = new Prompt<Alarm>('flavor')
+    .ask(choiceRenderer)
+    .validate(ifChoice)
+    .thenDo((c, prompt) => {
+        setAlarmController(c, {
+            ... prompt.withArgs,
+            title: prompt.result
+        });
+    })
+    .elseDo((c, prompt) => {
+    
+    })
+    .args(flavors);
+
+    prompt.call(getFlavor.with(foo).ask("What flavor").args(flavors))
+
+
+interface Renderer<RECOGNIZERARGS> {
+    ({
+        recognizerArgs: RECOGNIZERARGS;
+        text: string;
+    }): Activity;
+}
+/*
+
+Stuff this model doesn't seem to support
+
+* how "with" is supplied on call
+* outgoing messages all up
+
+Prompts are:
+
+* an outgoing message (not supplied by this model at all)
+* a validator/recognizer for the response
+* ... the arguments for which might be supplied at runtime (e.g. list of choices)
+* a handler for a validated response
+* an optional handler for a non-validated response (with a default if not supplied)
+
+Would be convenient if it were easy to create a prompt of a given type, e.g. TextPrompt, DatePrompt, ChoicePrompt.
+
+Would be nice if the "fluent" part read like a sentence. "Prompt" is almost certainly not the right word.
+
+Recognizers being if* is screwing things up a bit.
+
+*/
