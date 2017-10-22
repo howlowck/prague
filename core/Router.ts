@@ -149,67 +149,6 @@ export function run <M extends Routable> (handler: Handler<M>) {
     return new RunRouter(handler);
 }
 
-export type Predicate <M extends Routable> =
-    (m: M) => Observableable<boolean>;
-
-export class IfTrueElse <M extends Routable> extends Router<M> {
-    constructor(
-        private predicate: Predicate<M>,
-        private thenRouter: Router<M>,
-        private elseRouter: Router<M>
-    ) {
-        super(m => toObservable(predicate(m))
-            .flatMap(result => result
-                ? thenRouter.getRoute(m)
-                : elseRouter.getRoute(m)
-            )
-        );
-    }
-}
-
-export class IfTrueThen <M extends Routable> extends Router<M> {
-    constructor(
-        private predicate: Predicate<M>,
-        private thenRouter: Router<M>
-    ) {
-        super(m => toFilteredObservable(predicate(m))
-            .flatMap(_ => thenRouter.getRoute(m))
-        );
-    }
-
-    elseDo(elseHandler: Handler<M>) {
-        return this.elseTry(Router.do(elseHandler));
-    }
-
-    elseTry(elseRouter: Router<M>) {
-        return new IfTrueElse(this.predicate, this.thenRouter, elseRouter)
-    }
-}
-
-export class IfTrue <M extends Routable> {
-    constructor (
-        private predicate: Predicate<M>
-    ) {
-    }
-
-    thenDo(thenHandler: Handler<M>) {
-        return this.thenTry(Router.do(thenHandler));
-    }
-
-    thenTry(thenRouter: Router<M>) {
-        return new IfTrueThen(this.predicate, thenRouter);
-    }
-}
-
-export function ifTrue <M extends Routable> (
-    predicate: Predicate<M>
-): IfTrue<M> {
-    return new IfTrue(predicate);
-}
-
-export type Matcher <M extends Routable, RESULT> =
-    (m: M) => Observableable<MatcherResult<RESULT> | MatcherError | RESULT>;
-
 export interface MatcherResult<RESULT> {
     result: RESULT;
     score?: number;
@@ -221,11 +160,13 @@ export interface MatcherError {
 
 export type MatcherResultOrError<RESULT> = MatcherResult<RESULT> | MatcherError;
 
+export type Matcher <M, RESULT> = (m: M) => Observableable<MatcherResultOrError<RESULT> | RESULT>;
+
 function isMatcherResult <RESULT> (matcherResultOrError: MatcherResultOrError<RESULT>): matcherResultOrError is MatcherResult<RESULT> {
     return (matcherResultOrError as any).result !== undefined;
 }
 
-function toMatcherResultOrError <RESULT> (response: any): MatcherResultOrError<RESULT> {
+function normalizeMatcherResponse <RESULT> (response: any): MatcherResultOrError<RESULT> {
     if (!response)
         return {
             error: 'error'
@@ -237,11 +178,6 @@ function toMatcherResultOrError <RESULT> (response: any): MatcherResultOrError<R
     return {
         result: response as RESULT
     }
-}
-
-function match <M extends Routable, RESULT> (matcher: Matcher<M, RESULT>, m: M): Observable<MatcherResultOrError<RESULT>> {
-    return toObservable(matcher(m))
-        .map(response => toMatcherResultOrError(response));
 }
 
 export type HandlerWithResult <Z extends Routable, RESULT> =
@@ -271,7 +207,8 @@ export class IfMatchesElse <M extends Routable, RESULT> extends Router<M> {
         private getThenRouter: (result: RESULT) => Router<M>,
         private getElseRouter: (error: string) => Router<M>
     ) {
-        super(m => match(matcher, m)
+        super(m => toObservable(matcher(m))
+            .map(response => normalizeMatcherResponse<RESULT>(response))
             .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
                 ? getThenRouter(matcherResultOrError.result)
                     .getRoute(m)
@@ -288,7 +225,8 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
         private matcher: Matcher<M, RESULT>,
         private getThenRouter: (result: RESULT) => Router<M>
     ) {
-        super(m => match(matcher, m)
+        super(m => toObservable(matcher(m))
+            .map(response => normalizeMatcherResponse<RESULT>(response))
             .filter(matcherResultOrError => isMatcherResult(matcherResultOrError))
             .flatMap((matcherResult: MatcherResult<RESULT>) => getThenRouter(matcherResult.result)
                 .getRoute(m)
@@ -312,31 +250,24 @@ export class IfMatches <M extends Routable, RESULT> {
     ) {
     }
 
-    and(predicate: (m: M, result: RESULT) => Observableable<boolean | MatcherError>) {
-        return new IfMatches<M, RESULT>(m => match(this.matcher, m)
+    and (predicate: (result: RESULT) => IfTrue<M>): IfMatches<M, RESULT>;
+    and <TRANSFORMRESULT> (recognizer: (result: RESULT) => IfMatches<M, TRANSFORMRESULT>): IfMatches<M, TRANSFORMRESULT>;
+    and (predicateOrRecognizer: Function) {
+        return ifMatches((m: M) => toObservable(this.matcher(m))
+            .map(response => normalizeMatcherResponse<RESULT>(response))
             .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
-                ? toObservable(predicate(m, matcherResultOrError.result))
-                    .map(response => toMatcherResultOrError(response))
-                    .map(_matcherResultOrError => isMatcherResult(_matcherResultOrError)
-                        ? matcherResultOrError
-                        : _matcherResultOrError
-                    )
-                : Observable.of(matcherResultOrError)
-            )
-        );
-    }
-
-    andTransform <TRANSFORMRESULT> (transformer: (c: M, result: RESULT) => Observableable<MatcherResult<TRANSFORMRESULT> | MatcherError | TRANSFORMRESULT>) {
-        return new IfMatches<M, TRANSFORMRESULT>(m => match(this.matcher, m)
-            .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
-                ? toObservable(transformer(m, matcherResultOrError.result))
-                    .map(response => toMatcherResultOrError<TRANSFORMRESULT>(response))
-                    .map(_matcherResultOrError => isMatcherResult(_matcherResultOrError)
-                        ? {
-                            result: _matcherResultOrError.result,
-                            score: combineScore(toScore(matcherResultOrError.score), toScore(_matcherResultOrError.score))
-                        }
-                        : _matcherResultOrError
+                ? toObservable(predicateOrRecognizer(matcherResultOrError.result))
+                    .flatMap((ifThing: IfMatches<M, any>) => toObservable(ifThing.matcher(m))
+                        .map(_response => normalizeMatcherResponse(_response))
+                        .map(_matcherResultOrError => isMatcherResult(_matcherResultOrError)
+                            ? ifThing instanceof ifTrue
+                                ? matcherResultOrError
+                                : {
+                                    result: _matcherResultOrError.result,
+                                    score: combineScore(toScore(matcherResultOrError.score), toScore(_matcherResultOrError.score))
+                                }
+                            : _matcherResultOrError
+                        )
                     )
                 : Observable.of(matcherResultOrError)
             )
@@ -355,6 +286,33 @@ export class IfMatches <M extends Routable, RESULT> {
             : result => arg
         );
     }
+}
+
+function ifMatches <M extends Routable, RESULT>(
+    matcher: Matcher<M, RESULT>
+) {
+    return new IfMatches(matcher);
+}
+
+export type Predicate <M extends Routable> = Matcher<M, boolean>;
+
+export class IfTrue <M extends Routable> extends IfMatches<M, boolean> {
+    constructor(
+        predicate: Predicate<M>
+    ) {
+        super(m => toObservable(predicate(m))
+            .map((response: any) => typeof(response) === 'object' && (response.error || response.result)
+                ? response
+                : !!response
+            )
+        );
+    }
+}
+
+export function ifTrue <M extends Routable> (
+    predicate: Predicate<M>
+): IfTrue<M> {
+    return new IfTrue(predicate);
 }
 
 /*
@@ -529,6 +487,7 @@ interface ActivityBase {
 interface MessageActivity extends ActivityBase {
     type: 'message';
     text: string;
+    attachments: any[];
 }
 
 interface TypingActivity extends ActivityBase {
@@ -545,59 +504,91 @@ interface BotContext extends Routable {
 
 // Recognizers
 
-const ifMessage = () => new IfMatches((c: BotContext) => {
-     if (c.request.type !== 'message')
-        return { error: 'ifMessage.notMessage' }
-    
-    return c.request
-});
+const ifMessage = () => ifMatches<BotContext, MessageActivity>(c =>
+    c.request.type === 'message'
+        ? c.request
+        : { error: 'ifMessage.notMessage' }
+);
+
+const ifTextFromMessage = (message: MessageActivity) => ifMatches((c: BotContext) =>
+    (message.text.length > 0)
+        ? message.text
+        : { error: 'ifText.noText' }
+);
+
+ifMessage()
+    .thenTry(message => ifTextFromMessage(message)
+        .thenDo((c, text) =>
+            c.reply(`You said "${text}" and had ${message.attachments.length} attachments`)
+        )
+    )
+
+ifMessage()
+    .and(ifTextFromMessage)
+    .thenDo((c, text) =>
+        c.reply(`You said "${text}"`)
+    )
 
 const ifText = () => ifMessage()
-    .andTransform((c, message) => {
-        if (message.text.length === 0)
-            return { error: 'ifText.noText' };
-        
-        return message.text;
-    });
+    .and(ifTextFromMessage);
+
+ifText()
+    .thenDo((c, text) =>
+        c.reply(`You said "${text}"`)
+    )
+
+const ifShort = (length: number) => ifText()
+    .and(text => ifTrue((c: BotContext) => text.length <= length))
+
+ifShort(5)
+    .thenDo(c => c.reply("hi"))
+
+const ifRegExpMatchesText = (text: string, regexp: RegExp) => ifMatches((c: BotContext) => {
+    const result = regexp.exec(text);
+    if (!result)
+        return { error: 'ifRegExp.noMatch' }
+
+    return result;
+});
+
+ifText()
+    .and(text => ifRegExpMatchesText(text, /foo/))
+    .thenDo((c, matches) => c.reply(matches[0]))
+
+ifText()
+    .thenTry(text => ifRegExpMatchesText(text, /foo/)
+        .thenDo((c, matches) => {})
+    )
 
 const ifRegExp = (regexp: RegExp) => ifText()
-    .andTransform((c, text) => {
-        const result = regexp.exec(text);
-        if (!result)
-            return { error: 'ifRegExp.noMatch' }
-
-        return result;
-    });
+    .and(text => ifRegExpMatchesText(text, /foo/))
 
 const ifIntro = () => ifRegExp(/I am (.*)/)
-    .andTransform((c, matches) => ({ result: matches[0] }));
+    .and(matches => ifMatches(c => matches[0]));
 
 const ifNames = (... names: string[]) => ifIntro()
-    .and((c, name) => {
-        return names.includes(name) || { error: 'ifNames.noMatch' };
-    });
+    .and(name => ifMatches(c => names.includes(name) || { error: 'ifNames.noMatch' }));
 
 const ifBillish = () => ifNames('Bill', 'Billy', 'William', 'Will', 'Willy');
 
+ifBillish()
+    .thenDo((c, name) => `You call yourself ${name} but I know you're just a Bill.`);
+
 const ifChoice = (choices: string[]) => ifText()
-    .andTransform((c, text) => {
+    .and(text => ifMatches(c => {
         const choice = choices.find(choice => choice.toLowerCase() === text.toLowerCase());
-        if (!choice)
-            return { error: 'ifChoice.notInChoices' }
-        return choice;
-    });
+        return choice || { error: 'ifChoice.notInChoices' }
+    }));
 
 const ifTime = () => ifText()
-    .andTransform((c, text) => {
+    .and(text => ifMatches(c => {
         const result = new Date(text); // replace with an actual date parser
-        if (!result)
-            return { error: 'ifTime.didntParse' }
-        return result;
-    });
+        return { result, score: .5 } || { error: 'ifTime.didntParse' }
+    }));
 
 // Routers
 
-ifTrue(c => true)
+ifTrue((c: BotContext) => true)
     .thenDo(c => console.log("true"))
     .elseTry(
         ifTrue(c => true).thenDo(c => console.log("false"))
@@ -636,7 +627,7 @@ ifRegExp(/Go to (.*)/i).thenTry(matches =>
 // create a prompt using a custom recognizer
 
 const ifUsername = () => ifText()
-    .and((c, text) => text.length > 5 && text.length < 20);
+    .and(text => ifTrue(c => text.length > 5 && text.length < 20));
 
 const getUsername = new Prompt('username')
     .validate(ifUsername)
@@ -744,5 +735,10 @@ Prompts are:
 Would be nice if the "fluent" part read like a sentence. "Prompt" is almost certainly not the right word.
 
 Recognizers being if* is screwing that up a bit.
+
+TO DO:
+
+* consider else* vs default*
+* error routes (based on abstract routes)
 
 */
