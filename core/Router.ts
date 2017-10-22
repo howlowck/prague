@@ -282,6 +282,7 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
         return new IfMatchesElse(this.matcher, this.getThenRouter, typeof(arg) === 'function'
             ? arg
             : reason => arg
+        );
     }
 }
 
@@ -315,7 +316,7 @@ export class IfMatches <M extends Routable, RESULT> {
         );
     }
 
-    thenDo(thenHandler: (m: M, result: RESULT) => Observableable<M>) {
+    thenDo(thenHandler: (m: M, result: RESULT) => Observableable<any>) {
         return this.thenTry(result => Router.do<M>(m => thenHandler(m, result)));
     }
 
@@ -470,7 +471,7 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
         return Router.do(c => console.log("I should probably retry or something"));
     }
 
-    elseDo(promptElseHandler: (m: M, promptElseArgs: PromptElseArgs<WITHARGS, RECOGNIZERARGS>) => Observableable<M>) {
+    elseDo(promptElseHandler: (m: M, promptElseArgs: PromptElseArgs<WITHARGS, RECOGNIZERARGS>) => Observableable<any>) {
         return this.elseTry(promptElseArgs => Router.do(m => promptElseHandler(m, promptElseArgs)));
     }
 
@@ -503,7 +504,7 @@ class PromptRecognizer <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> {
     ) {
     }
 
-    thenDo(promptThenHandler: (m: M, promptThenArgs: PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS>) => Observableable<M>) {
+    thenDo(promptThenHandler: (m: M, promptThenArgs: PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS>) => Observableable<any>) {
         return new PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>(this.name, this.recognizer, promptThenArgs => Router.do(m => promptThenHandler(m, promptThenArgs))); 
     }
 
