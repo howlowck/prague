@@ -210,12 +210,41 @@ export function ifTrue <M extends Routable> (
 }
 
 export interface Matcher <M extends Routable, RESULT> {
-    (m: M): Observableable<MatcherResult<RESULT>>;
+    (m: M): Observableable<MatcherResult<RESULT> | MatcherError | RESULT>;
 }
 
 export interface MatcherResult<RESULT> {
     result: RESULT;
     score?: number;
+}
+
+export interface MatcherError {
+    error: string;
+}
+
+export type MatcherResultOrError<RESULT> = MatcherResult<RESULT> | MatcherError;
+
+function isMatcherResult <RESULT> (matcherResultOrError: MatcherResultOrError<RESULT>): matcherResultOrError is MatcherResult<RESULT> {
+    return (matcherResultOrError as any).result !== undefined;
+}
+
+function toMatcherResultOrError <RESULT> (response: any): MatcherResultOrError<RESULT> {
+    if (!response)
+        return {
+            error: 'error'
+        }
+
+    if (typeof(response) === 'object' && (response.error || response.result))
+        return response;
+
+    return {
+        result: response as RESULT
+    }
+}
+
+function match <M extends Routable, RESULT> (matcher: Matcher<M, RESULT>, m: M): Observable<MatcherResultOrError<RESULT>> {
+    return toObservable(matcher(m))
+        .map(response => toMatcherResultOrError(response));
 }
 
 export interface HandlerWithResult <Z extends Routable, RESULT> {
@@ -245,14 +274,14 @@ export class IfMatchesElse <M extends Routable, RESULT> extends Router<M> {
     constructor(
         private matcher: Matcher<M, RESULT>,
         private getThenRouter: (result: RESULT) => Router<M>,
-        private elseRouter: Router<M>
+        private getElseRouter: (error: string) => Router<M>
     ) {
-        super(m => toObservable(matcher(m))
-            .flatMap(matcherResult => matcherResult
-                ? getThenRouter(matcherResult.result)
+        super(m => match(matcher, m)
+            .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
+                ? getThenRouter(matcherResultOrError.result)
                     .getRoute(m)
-                    .map(route => routeWithCombinedScore(route, matcherResult.score))    
-                : elseRouter
+                    .map(route => routeWithCombinedScore(route, matcherResultOrError.score))    
+                : getElseRouter(matcherResultOrError.error)
                     .getRoute(m)
             )
         );
@@ -264,8 +293,9 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
         private matcher: Matcher<M, RESULT>,
         private getThenRouter: (result: RESULT) => Router<M>
     ) {
-        super(m => toFilteredObservable(matcher(m))
-            .flatMap(matcherResult => getThenRouter(matcherResult.result)
+        super(m => match(matcher, m)
+            .filter(matcherResultOrError => isMatcherResult(matcherResultOrError))
+            .flatMap((matcherResult: MatcherResult<RESULT>) => getThenRouter(matcherResult.result)
                 .getRoute(m)
                 .map(route => routeWithCombinedScore(route, matcherResult.score))
             )
@@ -273,11 +303,11 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
     }
 
     elseDo(elseHandler: Handler<M>) {
-        return this.elseTry(Router.do(elseHandler))
+        return this.elseTry(error => Router.do(elseHandler))
     }
 
-    elseTry(elseRouter: Router<M>) {
-        return new IfMatchesElse(this.matcher, this.getThenRouter, elseRouter)
+    elseTry(getElseRouter: (error: string) => Router<M>) {
+        return new IfMatchesElse(this.matcher, this.getThenRouter, getElseRouter)
     }
 }
 
@@ -287,21 +317,33 @@ export class IfMatches <M extends Routable, RESULT> {
     ) {
     }
 
-    and(predicate: (m: M, result: RESULT) => Observableable<boolean>) {
-        return new IfMatches<M, RESULT>(m => toFilteredObservable(this.matcher(m))
-            .flatMap(matcherResult => toFilteredObservable(predicate(m, matcherResult.result))
-                .map(_ => matcherResult)
+    and(predicate: (m: M, result: RESULT) => Observableable<boolean | MatcherError>) {
+        return new IfMatches<M, RESULT>(m => match(this.matcher, m)
+            .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
+                ? toObservable(predicate(m, matcherResultOrError.result))
+                    .map(response => toMatcherResultOrError(response))
+                    .map(_matcherResultOrError => isMatcherResult(_matcherResultOrError)
+                        ? matcherResultOrError
+                        : _matcherResultOrError
+                    )
+                : Observable.of(matcherResultOrError)
             )
         );
     }
 
-    andTransform <NEXTRESULT> (transformer: (c: M, result: RESULT) => Observableable<MatcherResult<NEXTRESULT>>) {
-        return new IfMatches<M, NEXTRESULT>(m => toFilteredObservable(this.matcher(m))
-            .flatMap(matcherResult => toFilteredObservable(transformer(m, matcherResult.result))
-                .map(nextMatcherResult => ({
-                    result: nextMatcherResult.result,
-                    score: combineScore(toScore(matcherResult.score), toScore(nextMatcherResult.score))
-                }))
+    andTransform <TRANSFORMRESULT> (transformer: (c: M, result: RESULT) => Observableable<MatcherResult<TRANSFORMRESULT> | MatcherError | TRANSFORMRESULT>) {
+        return new IfMatches<M, TRANSFORMRESULT>(m => match(this.matcher, m)
+            .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
+                ? toObservable(transformer(m, matcherResultOrError.result))
+                    .map(response => toMatcherResultOrError<TRANSFORMRESULT>(response))
+                    .map(_matcherResultOrError => isMatcherResult(_matcherResultOrError)
+                        ? {
+                            result: _matcherResultOrError.result,
+                            score: combineScore(toScore(matcherResultOrError.score), toScore(_matcherResultOrError.score))
+                        }
+                        : _matcherResultOrError
+                    )
+                : Observable.of(matcherResultOrError)
             )
         );
     }
@@ -396,6 +438,7 @@ interface PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS> extends PromptArgs<WI
 }
 
 interface PromptElseArgs<WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
+    error: string;
 }
 
 class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M> {
@@ -410,11 +453,14 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
                     ... promptArgs,
                     result
                 }))
-                .elseTry(this.defaultPromptElseRouter(promptArgs))
+                .elseTry(error => this.defaultPromptElseRouter({
+                    ... promptArgs,
+                    error
+                }))
         );
     }
 
-    private defaultPromptElseRouter(promptArgs: PromptArgs<WITHARGS, RECOGNIZERARGS>): Router<M> {
+    private defaultPromptElseRouter(promptElseArgs: PromptElseArgs<WITHARGS, RECOGNIZERARGS>): Router<M> {
         // default retry logic goes here
         return Router.do(c => console.log("I should probably retry or something"));
     }
@@ -423,12 +469,12 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
         return this.elseTry(promptArgs => Router.do(m => promptElseHandler(m, promptArgs)));
     }
 
-    elseTry(promptElseRouter: Router<M>): NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M>;        
-    elseTry(getPromptElseRouter: (promptArgs: PromptArgs<WITHARGS, RECOGNIZERARGS>) => Router<M>): NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M>;
+    elseTry(promptElseRouter: Router<M>): NamedRouter<PromptElseArgs<WITHARGS, RECOGNIZERARGS>, M>;        
+    elseTry(getPromptElseRouter: (promptElseArgs: PromptElseArgs<WITHARGS, RECOGNIZERARGS>) => Router<M>): NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M>;
     elseTry(arg) {
         const getPromptElseRouter = typeof(arg) === 'function'
             ? arg
-            : (promptArgs: PromptArgs<WITHARGS, RECOGNIZERARGS>) => arg;
+            : (promptElseArgs: PromptElseArgs<WITHARGS, RECOGNIZERARGS>) => arg;
 
         return new NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M>(this.name,
             promptArgs => this.recognizer(promptArgs.recognizerArgs)
@@ -436,7 +482,10 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
                     ... promptArgs,
                     result
                 }))
-                .elseTry(getPromptElseRouter(promptArgs)),
+                .elseTry(error => getPromptElseRouter({
+                    ... promptArgs,
+                    error
+                })),
             true
         );
     }
@@ -477,59 +526,81 @@ class Prompt <WITHARGS extends object = any, M extends object = any> {
 
 // Sample code
 
+interface ActivityBase {
+    type: string;
+    from: { id: string, name: string }
+}
+
+interface MessageActivity extends ActivityBase {
+    type: 'message';
+    text: string;
+}
+
+interface TypingActivity extends ActivityBase {
+    type: 'typing';
+}
+
+type Activity = MessageActivity | TypingActivity;
+
 interface BotContext extends Routable {
-    request: { type: string, text: string }
+    request: Activity;
     state: { conversation: any }
     reply: (text: string) => {};
 }
 
 // Recognizers
 
-const ifText = () => new IfMatches<BotContext, string>(c =>
-    c.request.type === 'message' && c.request.text.length > 0 && {
-        result: c.request.text
-    }
-);
+const ifMessage = () => new IfMatches((c: BotContext) => {
+     if (c.request.type !== 'message')
+        return { error: 'ifMessage.notMessage' }
+    
+    return c.request
+});
+
+const ifText = () => ifMessage()
+    .andTransform((c, message) => {
+        if (message.text.length === 0)
+            return { error: 'ifText.noText' };
+        
+        return message.text;
+    });
 
 const ifRegExp = (regexp: RegExp) => ifText()
     .andTransform((c, text) => {
         const result = regexp.exec(text);
-        return result && {
-            result
-        }
+        if (!result)
+            return { error: 'ifRegExp.noMatch' }
+
+        return result;
     });
 
-const ifNames = (regexp: RegExp) => ifRegExp(/I am (.*)/)
-    .and((c, matches) => regexp.test(matches[0]));
+const ifIntro = () => ifRegExp(/I am (.*)/)
+    .andTransform((c, matches) => ({ result: matches[0] }));
 
-const ifBillish = () => ifNames(/Bill|Billy|William|Will|Willy/);
+const ifNames = (... names: string[]) => ifIntro()
+    .and((c, name) => {
+        return names.includes(name) || { error: 'ifNames.noMatch' };
+    });
 
+const ifBillish = () => ifNames('Bill', 'Billy', 'William', 'Will', 'Willy');
 
 const ifChoice = (choices: string[]) => ifText()
     .andTransform((c, text) => {
         const choice = choices.find(choice => choice.toLowerCase() === text.toLowerCase());
-        return choice && {
-            result: choice
-        }
+        if (!choice)
+            return { error: 'ifChoice.notInChoices' }
+        return choice;
     });
-
-const parseDate = (text: string) => {
-    // stub - real function would return undefined or parsed date
-    return new Date();
-}
 
 const ifTime = () => ifText()
     .andTransform((c, text) => {
-        const result = parseDate(text);
-        return result && {
-            result
-        }
-    // validate text and turn it into a Date
+        const result = new Date(text); // replace with an actual date parser
+        if (!result)
+            return { error: 'ifTime.didntParse' }
+        return result;
     });
 
 // Routers
-
-let r: Router<BotContext>;
 
 ifTrue(c => true)
     .thenDo(c => console.log("true"))
@@ -618,10 +689,13 @@ const getTitle = new Prompt<Alarm>('title')
         });
     })
     .elseDo((c, prompt) => {
-    
+        switch(prompt.error) {
+            case 'ifText.noText':
+                c.reply("Please supply a title.");
+            default:
+                c.reply("Say something, anything!");            
+        }
     })
-
-
 
 const getTime = new Prompt<Alarm>('title')
     .validate(ifTime)
@@ -672,10 +746,8 @@ Prompts are:
 * a handler for a validated response
 * an optional handler for a non-validated response (with a default if not supplied)
 
-Would be convenient if it were easy to create a prompt of a given type, e.g. TextPrompt, DatePrompt, ChoicePrompt.
-
 Would be nice if the "fluent" part read like a sentence. "Prompt" is almost certainly not the right word.
 
-Recognizers being if* is screwing things up a bit.
+Recognizers being if* is screwing that up a bit.
 
 */
