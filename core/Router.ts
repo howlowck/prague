@@ -21,11 +21,18 @@ export function toFilteredObservable <T> (t: Observableable<T>) {
     return Observable.of(t);
 }
 
-export interface Route {
-    score?: number;
-    thrown?: true;
+export interface ActionRoute {
+    type: 'action';
     action: () => Observableable<any>;
+    score?: number;
 }
+
+export interface NoRoute {
+    type: 'no';
+    reason: string;
+}
+
+export type Route = ActionRoute | NoRoute;
 
 export type Routable  = object;
 
@@ -35,19 +42,38 @@ export type Handler <Z extends Routable> =
 export class Router <M extends Routable> {
     constructor(public getRoute: (m: M) => Observable<Route>) {}
 
+    static actionRoute <M extends Routable> (
+        action: () => Observableable<any>,
+        score?: number
+    ) {
+        return {
+            type: 'action',
+            action,
+            score
+        } as ActionRoute;
+    }
+
     static do <M extends Routable> (handler: Handler<M>) {
-        return new Router<M>(m => Observable.of({
-            action: () => handler(m)
-        } as Route));
+        return new Router<M>(m => Observable.of(Router.actionRoute(() => handler(m))));
     }
     
-    static null = new Router<any>(m => Observable.empty());
+    static noRoute <M extends Routable> (reason: string = "none") {
+        return {
+            type: 'no',
+            reason
+        } as NoRoute;
+    }
+
+    static no (reason?: string) {
+        return new Router<any>(m => Observable.of(Router.noRoute(reason)));
+    }
 
     route (m: M) {
         return this
             .getRoute(m)
             .do(route => konsole.log("route: returned a route", route))
-            .flatMap(route => toObservable(route.action()))
+            .filter(route => route.type === 'action')
+            .flatMap((route: ActionRoute) => toObservable(route.action()))
             .do(_ => konsole.log("route: called action"));
     }
 
@@ -59,14 +85,18 @@ export class Router <M extends Routable> {
         return new AfterRouter<M>(handler, this);
     }
 
-    defaultDo (handler: Handler<M>) {
-        return this.defaultTry(Router.do(handler));
+    defaultDo (handler: (m: M, reason: string) => Observableable<any>) {
+        return this.defaultTry(reason => Router.do(m => handler(m, reason)));
     }
 
-    defaultTry (router: Router<M>) {
-        return new DefaultRouter<M>(this, router);
+    defaultTry (getRouter: (reason: string) => Router<M>): Router<M>;
+    defaultTry (router: Router<M>): Router<M>;
+    defaultTry (arg) {
+        return new DefaultRouter<M>(this, typeof(arg) === 'function'
+            ? arg
+            : reason => arg
+        );
     }
-
 }
 
 export class FirstRouter <M extends Routable> extends Router<M> {
@@ -76,13 +106,16 @@ export class FirstRouter <M extends Routable> extends Router<M> {
                 konsole.log(`first: trying router #${i}`);
                 return router
                     .getRoute(m)
-                    .do(n => konsole.log(`first: router #${i} succeeded`, n));
+                    .do(route => konsole.log(`first: router #${i} returned route`, route));
             })
-            .take(1) // so that we don't keep going through routers after we find one that matches);
+            .filter(route => route.type === 'action')
+            .take(1) // so that we don't keep going through routers after we find one that matches;
+            .defaultIfEmpty(Router.noRoute('tryInOrder'))
         );
     }
 }
 
+// calls getRoute on each router in turn, returning the first ActionRoute returned, else returning a NoRoute
 export function tryInOrder <M extends Routable> (... routers: Router<M>[]) {
     return new FirstRouter(... routers);
 }
@@ -140,7 +173,7 @@ export function best <M extends Routable> (... routersOrHandlers: RouterOrHandle
 export class RunRouter <M extends Routable> extends Router<M> {
     constructor(handler: Handler<M>) {
         super(m => toObservable(handler(m))
-            .filter(_ => false)
+            .map(_ => Router.noRoute('run'))
         );
     }
 }
@@ -154,34 +187,31 @@ export interface MatcherResult<RESULT> {
     score?: number;
 }
 
-export interface MatcherError {
-    error: string;
+export interface NoMatch {
+    reason: string;
 }
 
-export type MatcherResultOrError<RESULT> = MatcherResult<RESULT> | MatcherError;
+export type MatcherResponse<RESULT> = MatcherResult<RESULT> | NoMatch;
 
-export type Matcher <M, RESULT> = (m: M) => Observableable<MatcherResultOrError<RESULT> | RESULT>;
+export type Matcher <M, RESULT> = (m: M) => Observableable<MatcherResponse<RESULT> | RESULT>;
 
-function isMatcherResult <RESULT> (matcherResultOrError: MatcherResultOrError<RESULT>): matcherResultOrError is MatcherResult<RESULT> {
-    return (matcherResultOrError as any).result !== undefined;
+function isMatcherResult <RESULT> (matcherResponse: MatcherResponse<RESULT>): matcherResponse is MatcherResult<RESULT> {
+    return (matcherResponse as any).result !== undefined;
 }
 
-function normalizeMatcherResponse <RESULT> (response: any): MatcherResultOrError<RESULT> {
+function normalizeMatcherResponse <RESULT> (response: any): MatcherResponse<RESULT> {
     if (!response)
         return {
-            error: 'error'
+            reason: 'no'
         }
 
-    if (typeof(response) === 'object' && (response.error || response.result))
+    if (typeof(response) === 'object' && (response.reason || response.result))
         return response;
 
     return {
         result: response as RESULT
     }
 }
-
-export type HandlerWithResult <Z extends Routable, RESULT> =
-    (m: Z, r: RESULT) => Observableable<any>;
 
 export type Recognizer<M extends Routable, RECOGNIZERARGS, RESULT> =
     (recognizerArgs?: RECOGNIZERARGS) => IfMatches<M, RESULT>;
@@ -190,7 +220,7 @@ function combineScore(score, otherScore) {
     return score * otherScore
 }
 
-function routeWithCombinedScore(route: Route, newScore: number) {
+function routeWithCombinedScore(route: ActionRoute, newScore: number) {
     const score = combineScore(toScore(newScore), toScore(route.score));
 
     return toScore(route.score) === score
@@ -205,15 +235,18 @@ export class IfMatchesElse <M extends Routable, RESULT> extends Router<M> {
     constructor(
         private matcher: Matcher<M, RESULT>,
         private getThenRouter: (result: RESULT) => Router<M>,
-        private getElseRouter: (error: string) => Router<M>
+        private getElseRouter: (reason: string) => Router<M>
     ) {
         super(m => toObservable(matcher(m))
             .map(response => normalizeMatcherResponse<RESULT>(response))
-            .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
-                ? getThenRouter(matcherResultOrError.result)
+            .flatMap(matcherResponse => isMatcherResult(matcherResponse)
+                ? getThenRouter(matcherResponse.result)
                     .getRoute(m)
-                    .map(route => routeWithCombinedScore(route, matcherResultOrError.score))    
-                : getElseRouter(matcherResultOrError.error)
+                    .map(route => route.type === 'action'
+                        ? routeWithCombinedScore(route, matcherResponse.score)
+                        : Router.noRoute('foo')
+                    )
+            : getElseRouter(matcherResponse.reason)
                     .getRoute(m)
             )
         );
@@ -227,20 +260,28 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
     ) {
         super(m => toObservable(matcher(m))
             .map(response => normalizeMatcherResponse<RESULT>(response))
-            .filter(matcherResultOrError => isMatcherResult(matcherResultOrError))
-            .flatMap((matcherResult: MatcherResult<RESULT>) => getThenRouter(matcherResult.result)
-                .getRoute(m)
-                .map(route => routeWithCombinedScore(route, matcherResult.score))
+            .flatMap(matcherResponse => isMatcherResult(matcherResponse)
+                ? getThenRouter(matcherResponse.result)
+                    .getRoute(m)
+                    .map(route => route.type === 'action'
+                        ? routeWithCombinedScore(route, matcherResponse.score)
+                        : Router.noRoute('foo')
+                    )
+                : Observable.of(Router.noRoute(matcherResponse.reason))
             )
         );
     }
 
-    elseDo(elseHandler: Handler<M>) {
-        return this.elseTry(error => Router.do(elseHandler))
+    elseDo(elseHandler: (m: M, reason: string) => Observableable<M>) {
+        return this.elseTry(reason => Router.do(m => elseHandler(m, reason)));
     }
 
-    elseTry(getElseRouter: (error: string) => Router<M>) {
-        return new IfMatchesElse(this.matcher, this.getThenRouter, getElseRouter)
+    elseTry(elseRouter: Router<M>): IfMatchesElse<M, RESULT>;
+    elseTry(getElseRouter: (reason: string) => Router<M>): IfMatchesElse<M, RESULT>;
+    elseTry(arg) {
+        return new IfMatchesElse(this.matcher, this.getThenRouter, typeof(arg) === 'function'
+            ? arg
+            : reason => arg
     }
 }
 
@@ -255,26 +296,26 @@ export class IfMatches <M extends Routable, RESULT> {
     and (predicateOrRecognizer: Function) {
         return ifMatches((m: M) => toObservable(this.matcher(m))
             .map(response => normalizeMatcherResponse<RESULT>(response))
-            .flatMap(matcherResultOrError => isMatcherResult(matcherResultOrError)
-                ? toObservable(predicateOrRecognizer(matcherResultOrError.result))
+            .flatMap(matcherResponse => isMatcherResult(matcherResponse)
+                ? toObservable(predicateOrRecognizer(matcherResponse.result))
                     .flatMap((ifThing: IfMatches<M, any>) => toObservable(ifThing.matcher(m))
                         .map(_response => normalizeMatcherResponse(_response))
-                        .map(_matcherResultOrError => isMatcherResult(_matcherResultOrError)
+                        .map(_matcherResponse => isMatcherResult(_matcherResponse)
                             ? ifThing instanceof ifTrue
-                                ? matcherResultOrError
+                                ? matcherResponse
                                 : {
-                                    result: _matcherResultOrError.result,
-                                    score: combineScore(toScore(matcherResultOrError.score), toScore(_matcherResultOrError.score))
+                                    result: _matcherResponse.result,
+                                    score: combineScore(toScore(matcherResponse.score), toScore(_matcherResponse.score))
                                 }
-                            : _matcherResultOrError
+                            : _matcherResponse
                         )
                     )
-                : Observable.of(matcherResultOrError)
+                : Observable.of(matcherResponse)
             )
         );
     }
 
-    thenDo(thenHandler: HandlerWithResult<M, RESULT>) {
+    thenDo(thenHandler: (m: M, result: RESULT) => Observableable<M>) {
         return this.thenTry(result => Router.do<M>(m => thenHandler(m, result)));
     }
 
@@ -301,7 +342,7 @@ export class IfTrue <M extends Routable> extends IfMatches<M, boolean> {
         predicate: Predicate<M>
     ) {
         super(m => toObservable(predicate(m))
-            .map((response: any) => typeof(response) === 'object' && (response.error || response.result)
+            .map((response: any) => typeof(response) === 'object' && (response.reason || response.result)
                 ? response
                 : !!response
             )
@@ -338,11 +379,14 @@ export class BeforeRouter <M extends Routable> extends Router<M> {
     constructor (beforeHandler: Handler<M>, router: Router<M>) {
         super(m => router
             .getRoute(m)
-            .map(route => ({
-                ... route,
-                action: () => toObservable(beforeHandler(m))
-                    .flatMap(_ => toObservable(route.action()))
-            }))
+            .map(route => route.type === 'action'
+                ? {
+                    ... route,
+                    action: () => toObservable(beforeHandler(m))
+                        .flatMap(_ => toObservable(route.action()))
+                }
+                : route
+            )
         );
     }
 }
@@ -351,20 +395,28 @@ export class AfterRouter <M extends Routable> extends Router<M> {
     constructor (afterHandler: Handler<M>, router: Router<M>) {
         super(m => router
             .getRoute(m)
-            .map(route => ({
-                ... route,
-                action: () => toObservable(route.action())
-                    .flatMap(_ => toObservable(afterHandler(m)))
-            }))
+            .map(route => route.type === 'action'
+                ? {
+                    ... route,
+                    action: () => toObservable(route.action())
+                        .flatMap(_ => toObservable(afterHandler(m)))
+                }
+                : route
+            )
         );
     }
 }
 
 export class DefaultRouter <M extends Routable> extends Router<M> {
-    constructor (mainRouter: Router<M>, defaultRouter: Router<M>) {
-        super(m => Observable.from([mainRouter, defaultRouter])
-            .concatMap(router => router.getRoute(m))
-            .take(1) // so that we don't keep going through routers after we find one that matches);
+    constructor (
+        mainRouter: Router<M>,
+        getDefaultRouter: (reason: string) => Router<M>
+    ) {
+        super(m => mainRouter.getRoute(m)
+            .flatMap(route => route.type === 'action'
+                ? Observable.of(route)
+                : getDefaultRouter(route.reason).getRoute(m)
+            )
         );
     }
 }
@@ -391,7 +443,7 @@ interface PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS> extends PromptArgs<WI
 }
 
 interface PromptElseArgs<WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
-    error: string;
+    reason: string;
 }
 
 class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M> {
@@ -406,9 +458,9 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
                     ... promptArgs,
                     result
                 }))
-                .elseTry(error => this.defaultPromptElseRouter({
+                .elseTry(reason => this.defaultPromptElseRouter({
                     ... promptArgs,
-                    error
+                    reason
                 }))
         );
     }
@@ -418,8 +470,8 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
         return Router.do(c => console.log("I should probably retry or something"));
     }
 
-    elseDo(promptElseHandler: HandlerWithResult<M, PromptElseArgs<WITHARGS, RECOGNIZERARGS>>) {
-        return this.elseTry(promptArgs => Router.do(m => promptElseHandler(m, promptArgs)));
+    elseDo(promptElseHandler: (m: M, promptElseArgs: PromptElseArgs<WITHARGS, RECOGNIZERARGS>) => Observableable<M>) {
+        return this.elseTry(promptElseArgs => Router.do(m => promptElseHandler(m, promptElseArgs)));
     }
 
     elseTry(promptElseRouter: Router<M>): NamedRouter<PromptElseArgs<WITHARGS, RECOGNIZERARGS>, M>;        
@@ -435,9 +487,9 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
                     ... promptArgs,
                     result
                 }))
-                .elseTry(error => getPromptElseRouter({
+                .elseTry(reason => getPromptElseRouter({
                     ... promptArgs,
-                    error
+                    reason
                 })),
             true
         );
@@ -451,8 +503,8 @@ class PromptRecognizer <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> {
     ) {
     }
 
-    thenDo(promptThenHandler: HandlerWithResult<M, PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS>>) {
-        return new PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>(this.name, this.recognizer, promptArgs => Router.do(m => promptThenHandler(m, promptArgs))); 
+    thenDo(promptThenHandler: (m: M, promptThenArgs: PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS>) => Observableable<M>) {
+        return new PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>(this.name, this.recognizer, promptThenArgs => Router.do(m => promptThenHandler(m, promptThenArgs))); 
     }
 
     thenTry(promptThenRouter: Router<M>): PromptThen<WITHARGS, RECOGNIZERARGS, RESULT, M>;
@@ -507,13 +559,13 @@ interface BotContext extends Routable {
 const ifMessage = () => ifMatches<BotContext, MessageActivity>(c =>
     c.request.type === 'message'
         ? c.request
-        : { error: 'ifMessage.notMessage' }
+        : { reason: 'ifMessage' }
 );
 
 const ifTextFromMessage = (message: MessageActivity) => ifMatches((c: BotContext) =>
     (message.text.length > 0)
         ? message.text
-        : { error: 'ifText.noText' }
+        : { reason: 'ifText' }
 );
 
 ifMessage()
@@ -538,7 +590,7 @@ ifText()
     )
 
 const ifShort = (length: number) => ifText()
-    .and(text => ifTrue((c: BotContext) => text.length <= length))
+    .and(text => ifTrue(c => text.length <= length))
 
 ifShort(5)
     .thenDo(c => c.reply("hi"))
@@ -546,7 +598,7 @@ ifShort(5)
 const ifRegExpMatchesText = (text: string, regexp: RegExp) => ifMatches((c: BotContext) => {
     const result = regexp.exec(text);
     if (!result)
-        return { error: 'ifRegExp.noMatch' }
+        return { reason: 'ifRegExp' }
 
     return result;
 });
@@ -567,7 +619,7 @@ const ifIntro = () => ifRegExp(/I am (.*)/)
     .and(matches => ifMatches(c => matches[0]));
 
 const ifNames = (... names: string[]) => ifIntro()
-    .and(name => ifMatches(c => names.includes(name) || { error: 'ifNames.noMatch' }));
+    .and(name => ifMatches(c => names.includes(name) || { reason: 'ifNames' }));
 
 const ifBillish = () => ifNames('Bill', 'Billy', 'William', 'Will', 'Willy');
 
@@ -577,27 +629,27 @@ ifBillish()
 const ifChoice = (choices: string[]) => ifText()
     .and(text => ifMatches(c => {
         const choice = choices.find(choice => choice.toLowerCase() === text.toLowerCase());
-        return choice || { error: 'ifChoice.notInChoices' }
+        return choice || { reason: 'ifChoice' }
     }));
 
 const ifTime = () => ifText()
     .and(text => ifMatches(c => {
         const result = new Date(text); // replace with an actual date parser
-        return { result, score: .5 } || { error: 'ifTime.didntParse' }
+        return { result, score: .5 } || { reason: 'ifTime' }
     }));
 
 // Routers
 
-ifTrue((c: BotContext) => true)
+ifTrue<BotContext>(c => true)
     .thenDo(c => console.log("true"))
     .elseTry(
-        ifTrue(c => true).thenDo(c => console.log("false"))
+        ifTrue<BotContext>(c => true).thenDo(c => console.log("false"))
     );
 
-ifTrue(c => true).thenTry(
+ifTrue<BotContext>(c => true).thenTry(
     tryInOrder(
-        ifTrue(c => true).thenDo(c => console.log("hi")),
-        ifTrue(c => false).thenDo(c => console.log("bye"))
+        ifTrue<BotContext>(c => true).thenDo(c => console.log("hi")),
+        ifTrue<BotContext>(c => false).thenDo(c => console.log("bye"))
     )
     .defaultDo(c => console.log("huh?"))
 );
@@ -675,7 +727,7 @@ const getTitle = new Prompt<Alarm>('title')
         });
     })
     .elseDo((c, prompt) => {
-        switch(prompt.error) {
+        switch(prompt.reason) {
             case 'ifText.noText':
                 c.reply("Please supply a title.");
             default:
@@ -738,7 +790,6 @@ Recognizers being if* is screwing that up a bit.
 
 TO DO:
 
-* consider else* vs default*
-* error routes (based on abstract routes)
+* revisit prompt 'else' logic
 
 */
