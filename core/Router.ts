@@ -29,9 +29,8 @@ export interface Route {
 
 export type Routable  = object;
 
-export interface Handler <Z extends Routable> {
-    (m: Z): Observableable<any>;
-}
+export type Handler <Z extends Routable> =
+    (m: Z) => Observableable<any>;
 
 export class Router <M extends Routable> {
     constructor(public getRoute: (m: M) => Observable<Route>) {}
@@ -150,9 +149,8 @@ export function run <M extends Routable> (handler: Handler<M>) {
     return new RunRouter(handler);
 }
 
-export interface Predicate <M extends Routable> {
-    (m: M): Observableable<boolean>;
-}
+export type Predicate <M extends Routable> =
+    (m: M) => Observableable<boolean>;
 
 export class IfTrueElse <M extends Routable> extends Router<M> {
     constructor(
@@ -209,9 +207,8 @@ export function ifTrue <M extends Routable> (
     return new IfTrue(predicate);
 }
 
-export interface Matcher <M extends Routable, RESULT> {
-    (m: M): Observableable<MatcherResult<RESULT> | MatcherError | RESULT>;
-}
+export type Matcher <M extends Routable, RESULT> =
+    (m: M) => Observableable<MatcherResult<RESULT> | MatcherError | RESULT>;
 
 export interface MatcherResult<RESULT> {
     result: RESULT;
@@ -247,13 +244,11 @@ function match <M extends Routable, RESULT> (matcher: Matcher<M, RESULT>, m: M):
         .map(response => toMatcherResultOrError(response));
 }
 
-export interface HandlerWithResult <Z extends Routable, RESULT> {
-    (m: Z, r: RESULT): Observableable<any>;
-}
+export type HandlerWithResult <Z extends Routable, RESULT> =
+    (m: Z, r: RESULT) => Observableable<any>;
 
-export interface Recognizer<M extends Routable, RECOGNIZERARGS, RESULT> {
-    (recognizerArgs?: RECOGNIZERARGS): IfMatches<M, RESULT>
-}
+export type Recognizer<M extends Routable, RECOGNIZERARGS, RESULT> =
+    (recognizerArgs?: RECOGNIZERARGS) => IfMatches<M, RESULT>;
 
 function combineScore(score, otherScore) {
     return score * otherScore
@@ -416,7 +411,7 @@ export class DefaultRouter <M extends Routable> extends Router<M> {
     }
 }
 
-class NamedRouter <ARGS extends object = any, M extends object = any> {
+class NamedRouter <ARGS extends object, M extends Routable> {
     constructor(
         name: string,
         public getRouter: (args?: ARGS) => Router<M>,
