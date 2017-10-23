@@ -34,7 +34,7 @@ export interface NoRoute {
 
 export type Route = ActionRoute | NoRoute;
 
-export type Routable  = object;
+export type Routable = object;
 
 export type Handler <Z extends Routable> =
     (m: Z) => Observableable<any>;
@@ -272,7 +272,7 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
         );
     }
 
-    elseDo(elseHandler: (m: M, reason: string) => Observableable<M>) {
+    elseDo(elseHandler: (m: M, reason: string) => Observableable<any>) {
         return this.elseTry(reason => Router.do(m => elseHandler(m, reason)));
     }
 
@@ -294,15 +294,15 @@ export class IfMatches <M extends Routable, RESULT> {
 
     and (predicate: (result: RESULT) => IfTrue<M>): IfMatches<M, RESULT>;
     and <TRANSFORMRESULT> (recognizer: (result: RESULT) => IfMatches<M, TRANSFORMRESULT>): IfMatches<M, TRANSFORMRESULT>;
-    and (predicateOrRecognizer: Function) {
+    and <TRANSFORMRESULT> (recognizer: (result: RESULT) => IfMatches<M, TRANSFORMRESULT>) {
         return ifMatches((m: M) => toObservable(this.matcher(m))
             .map(response => normalizeMatcherResponse<RESULT>(response))
             .flatMap(matcherResponse => isMatcherResult(matcherResponse)
-                ? toObservable(predicateOrRecognizer(matcherResponse.result))
-                    .flatMap((ifThing: IfMatches<M, any>) => toObservable(ifThing.matcher(m))
+                ? toObservable(recognizer(matcherResponse.result))
+                    .flatMap(_ifMatches => toObservable(_ifMatches.matcher(m))
                         .map(_response => normalizeMatcherResponse(_response))
                         .map(_matcherResponse => isMatcherResult(_matcherResponse)
-                            ? ifThing instanceof ifTrue
+                            ? _ifMatches instanceof ifTrue
                                 ? matcherResponse
                                 : {
                                     result: _matcherResponse.result,
@@ -330,7 +330,7 @@ export class IfMatches <M extends Routable, RESULT> {
     }
 }
 
-function ifMatches <M extends Routable, RESULT>(
+export function ifMatches <M extends Routable, RESULT>(
     matcher: Matcher<M, RESULT>
 ) {
     return new IfMatches(matcher);
@@ -422,32 +422,45 @@ export class DefaultRouter <M extends Routable> extends Router<M> {
     }
 }
 
-class NamedRouter <ARGS extends object, M extends Routable> {
+export class NamedRouter <ARGS extends object, M extends Routable> {
+    private static registry: {
+        [name: string]: (args: any) => Router<any>;
+    } = {}
+
     constructor(
         name: string,
         public getRouter: (args?: ARGS) => Router<M>,
         redefine = false
     ) {
-        // add the router to the registry.
-        // if name already exists and redefine is false, throw (or log) an error
+        if (NamedRouter.registry[name] && !redefine) {
+            console.warn(`You tried to redefine a Named Router named ${name} without setting the "redefine" flag. This attempt was ignored.`);
+            return;
+        }
+
+        NamedRouter.registry[name] = getRouter;
+    }
+
+    static getRouter(name: string, args: any) {
+        const getRouter = NamedRouter.registry[name];
+        return getRouter && getRouter(args);
     }
 }
 
-interface PromptArgs<WITHARGS, RECOGNIZERARGS> {
+export interface PromptArgs<WITHARGS, RECOGNIZERARGS> {
     recognizerArgs: RECOGNIZERARGS;
     withArgs: WITHARGS;
     turn: number;
 }
 
-interface PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
+export interface PromptThenArgs<RESULT, WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
     result: RESULT;
 }
 
-interface PromptElseArgs<WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
+export interface PromptElseArgs<WITHARGS, RECOGNIZERARGS> extends PromptArgs<WITHARGS, RECOGNIZERARGS> {
     reason: string;
 }
 
-class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M> {
+export class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends NamedRouter<PromptArgs<WITHARGS, RECOGNIZERARGS>, M> {
     constructor(
         private name: string,
         private recognizer: Recognizer<M, RECOGNIZERARGS, RESULT>,
@@ -497,7 +510,7 @@ class PromptThen <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> extends 
     }
 }
 
-class PromptRecognizer <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> {
+export class PromptRecognizer <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> {
     constructor(
         private name: string,
         private recognizer: Recognizer<M, RECOGNIZERARGS, RESULT>
@@ -518,7 +531,7 @@ class PromptRecognizer <WITHARGS, RECOGNIZERARGS, RESULT, M extends Routable> {
     }
 }
 
-class Prompt <WITHARGS extends object = any, M extends object = any> {
+export class Prompt <WITHARGS extends object = any, M extends object = any> {
     constructor(
         private name: string,
     ) {
@@ -528,269 +541,3 @@ class Prompt <WITHARGS extends object = any, M extends object = any> {
         return new PromptRecognizer<WITHARGS, ARG, RESULT, M>(this.name, recognizer);
     }
 }
-
-
-// Sample code
-
-interface ActivityBase {
-    type: string;
-    from: { id: string, name: string }
-}
-
-interface MessageActivity extends ActivityBase {
-    type: 'message';
-    text: string;
-    attachments: any[];
-}
-
-interface TypingActivity extends ActivityBase {
-    type: 'typing';
-}
-
-type Activity = MessageActivity | TypingActivity;
-
-interface BotContext extends Routable {
-    request: Activity;
-    state: { conversation: any }
-    reply: (text: string) => {};
-}
-
-// Recognizers
-
-const ifMessage = () => ifMatches<BotContext, MessageActivity>(c =>
-    c.request.type === 'message'
-        ? c.request
-        : { reason: 'ifMessage' }
-);
-
-const ifTextFromMessage = (message: MessageActivity) => ifMatches((c: BotContext) =>
-    (message.text.length > 0)
-        ? message.text
-        : { reason: 'ifText' }
-);
-
-ifMessage()
-    .thenTry(message => ifTextFromMessage(message)
-        .thenDo((c, text) =>
-            c.reply(`You said "${text}" and had ${message.attachments.length} attachments`)
-        )
-    )
-
-ifMessage()
-    .and(ifTextFromMessage)
-    .thenDo((c, text) =>
-        c.reply(`You said "${text}"`)
-    )
-
-const ifText = () => ifMessage()
-    .and(ifTextFromMessage);
-
-ifText()
-    .thenDo((c, text) =>
-        c.reply(`You said "${text}"`)
-    )
-
-const ifShort = (length: number) => ifText()
-    .and(text => ifTrue(c => text.length <= length))
-
-ifShort(5)
-    .thenDo(c => c.reply("hi"))
-
-const ifRegExpMatchesText = (text: string, regexp: RegExp) => ifMatches((c: BotContext) => {
-    const result = regexp.exec(text);
-    if (!result)
-        return { reason: 'ifRegExp' }
-
-    return result;
-});
-
-ifText()
-    .and(text => ifRegExpMatchesText(text, /foo/))
-    .thenDo((c, matches) => c.reply(matches[0]))
-
-ifText()
-    .thenTry(text => ifRegExpMatchesText(text, /foo/)
-        .thenDo((c, matches) => {})
-    )
-
-const ifRegExp = (regexp: RegExp) => ifText()
-    .and(text => ifRegExpMatchesText(text, /foo/))
-
-const ifIntro = () => ifRegExp(/I am (.*)/)
-    .and(matches => ifMatches(c => matches[0]));
-
-const ifNames = (... names: string[]) => ifIntro()
-    .and(name => ifMatches(c => names.includes(name) || { reason: 'ifNames' }));
-
-const ifBillish = () => ifNames('Bill', 'Billy', 'William', 'Will', 'Willy');
-
-ifBillish()
-    .thenDo((c, name) => `You call yourself ${name} but I know you're just a Bill.`);
-
-const ifChoice = (choices: string[]) => ifText()
-    .and(text => ifMatches(c => {
-        const choice = choices.find(choice => choice.toLowerCase() === text.toLowerCase());
-        return choice || { reason: 'ifChoice' }
-    }));
-
-const ifTime = () => ifText()
-    .and(text => ifMatches(c => {
-        const result = new Date(text); // replace with an actual date parser
-        return { result, score: .5 } || { reason: 'ifTime' }
-    }));
-
-// Routers
-
-ifTrue<BotContext>(c => true)
-    .thenDo(c => console.log("true"))
-    .elseTry(
-        ifTrue<BotContext>(c => true).thenDo(c => console.log("false"))
-    );
-
-ifTrue<BotContext>(c => true).thenTry(
-    tryInOrder(
-        ifTrue<BotContext>(c => true).thenDo(c => console.log("hi")),
-        ifTrue<BotContext>(c => false).thenDo(c => console.log("bye"))
-    )
-    .defaultDo(c => console.log("huh?"))
-);
-
-ifRegExp(/foo/i)
-    .thenDo(c => console.log("matches!"));
-
-ifRegExp(/Go to (.*)/i)
-    .thenDo((c, matches) => console.log(`Let's go to ${matches[0]}`));
-
-ifRegExp(/Go to (.*)/i).thenTry(
-    tryInOrder(
-        ifTrue<BotContext>(c => false).thenDo(c => console.log("hi")),
-        ifTrue<BotContext>(c => false).thenDo(c => console.log("bye"))
-    )
-    .defaultDo(c => console.log("huh?"))
-);
-
-ifRegExp(/Go to (.*)/i).thenTry(matches =>
-    tryInOrder(
-        ifTrue<BotContext>(c => false).thenDo(c => console.log(`We're going to ${matches[0]}`)),
-        ifTrue<BotContext>(c => false).thenDo(c => console.log("bye"))
-    )
-    .defaultDo(c => console.log("huh?"))
-);
-
-// create a prompt using a custom recognizer
-
-const ifUsername = () => ifText()
-    .and(text => ifTrue(c => text.length > 5 && text.length < 20));
-
-const getUsername = new Prompt('username')
-    .validate(ifUsername)
-    .thenDo((c, prompt) => {
-        c.state.conversation.username = prompt.result;
-    })
-    // 'else' handler is optional - if present overrides the default handler
-    .elseDo((c, prompt) => {
-        c.reply("Usernames need to be the right length and stuff.");
-        // then push it back on to the stack or whatever
-    })
-
-// dynamic prompt args
-
-const getThing = new Prompt('thing')
-    .validate(ifRegExp)
-    .thenDo((c, matches) => c.reply("Yo"));
-
-interface Alarm {
-    title: string;
-    time: Date;
-}
-
-const setAlarmController = (c: BotContext, alarmStuff: Alarm) => {
-    if (!alarmStuff.title) {
-        // call getTitle with alarmStuff
-        return;
-    }
-
-    if (!alarmStuff.time) {
-        // call getTime with alarmStuff
-        return;
-    }
-
-    // then get the time if we don't have it
-    // then set the alarm
-}
-
-const getTitle = new Prompt<Alarm>('title')
-    .validate(ifText)
-    .thenDo((c, prompt) => {
-        setAlarmController(c, {
-            ... prompt.withArgs,
-            title: prompt.result
-        });
-    })
-    .elseDo((c, prompt) => {
-        switch(prompt.reason) {
-            case 'ifText.noText':
-                c.reply("Please supply a title.");
-            default:
-                c.reply("Say something, anything!");            
-        }
-    })
-
-const getTime = new Prompt<Alarm>('title')
-    .validate(ifTime)
-    .thenDo((c, prompt) => {
-        setAlarmController(c, {
-            ... prompt.withArgs,
-            time: prompt.result
-        });
-    });
-
-const flavors = ["chocolate", "vanilla", "strawberry"];
-
-const getFlavor = new Prompt<Alarm>('flavor')
-    .ask(choiceRenderer)
-    .validate(ifChoice)
-    .thenDo((c, prompt) => {
-        setAlarmController(c, {
-            ... prompt.withArgs,
-            title: prompt.result
-        });
-    })
-    .elseDo((c, prompt) => {
-    
-    })
-    .args(flavors);
-
-    prompt.call(getFlavor.with(foo).ask("What flavor").args(flavors))
-
-
-interface Renderer<RECOGNIZERARGS> {
-    ({
-        recognizerArgs: RECOGNIZERARGS;
-        text: string;
-    }): Activity;
-}
-/*
-
-Stuff this model doesn't seem to support
-
-* how "with" is supplied on call
-* outgoing messages all up
-
-Prompts are:
-
-* an outgoing message (not supplied by this model at all)
-* a validator/recognizer for the response
-* ... the arguments for which might be supplied at runtime (e.g. list of choices)
-* a handler for a validated response
-* an optional handler for a non-validated response (with a default if not supplied)
-
-Would be nice if the "fluent" part read like a sentence. "Prompt" is almost certainly not the right word.
-
-Recognizers being if* is screwing that up a bit.
-
-TO DO:
-
-* revisit prompt 'else' logic
-
-*/
