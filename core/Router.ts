@@ -11,16 +11,6 @@ export function toObservable <T> (t: Observableable<T>) {
     return Observable.of(t);
 }
 
-export function toFilteredObservable <T> (t: Observableable<T>) {
-    if (!t)
-        return Observable.empty<T>();
-    if (t instanceof Observable)
-        return t.filter(i => !!i);
-    if (t instanceof Promise)
-        return Observable.fromPromise<T> (t).filter(i => !!i);
-    return Observable.of(t);
-}
-
 export interface ActionRoute {
     type: 'action';
     action: () => Observableable<any>;
@@ -182,7 +172,7 @@ export function run <M extends Routable> (handler: Handler<M>) {
     return new RunRouter(handler);
 }
 
-export interface MatcherResult<RESULT> {
+export interface Match<RESULT> {
     result: RESULT;
     score?: number;
 }
@@ -191,11 +181,11 @@ export interface NoMatch {
     reason: string;
 }
 
-export type MatcherResponse<RESULT> = MatcherResult<RESULT> | NoMatch;
+export type MatcherResponse<RESULT> = Match<RESULT> | NoMatch;
 
 export type Matcher <M, RESULT> = (m: M) => Observableable<MatcherResponse<RESULT> | RESULT>;
 
-function isMatcherResult <RESULT> (matcherResponse: MatcherResponse<RESULT>): matcherResponse is MatcherResult<RESULT> {
+function isMatch <RESULT> (matcherResponse: MatcherResponse<RESULT>): matcherResponse is Match<RESULT> {
     return (matcherResponse as any).result !== undefined;
 }
 
@@ -205,8 +195,16 @@ function normalizeMatcherResponse <RESULT> (response: any): MatcherResponse<RESU
             reason: 'no'
         }
 
-    if (typeof(response) === 'object' && (response.reason || response.result))
-        return response;
+    if (typeof(response) === 'object') {
+        if (response.reason) {
+            if (typeof(response.reason) !== 'string')
+                throw new Error('The reason for NoMatch must be a string');
+            return response;
+        }
+
+        if (response.result)
+            return response;
+    }
 
     return {
         result: response as RESULT
@@ -239,7 +237,7 @@ export class IfMatchesElse <M extends Routable, RESULT> extends Router<M> {
     ) {
         super(m => toObservable(matcher(m))
             .map(response => normalizeMatcherResponse<RESULT>(response))
-            .flatMap(matcherResponse => isMatcherResult(matcherResponse)
+            .flatMap(matcherResponse => isMatch(matcherResponse)
                 ? getThenRouter(matcherResponse.result)
                     .getRoute(m)
                     .map(route => route.type === 'action'
@@ -260,7 +258,7 @@ export class IfMatchesThen <M extends Routable, RESULT = any> extends Router<M> 
     ) {
         super(m => toObservable(matcher(m))
             .map(response => normalizeMatcherResponse<RESULT>(response))
-            .flatMap(matcherResponse => isMatcherResult(matcherResponse)
+            .flatMap(matcherResponse => isMatch(matcherResponse)
                 ? getThenRouter(matcherResponse.result)
                     .getRoute(m)
                     .map(route => route.type === 'action'
@@ -297,11 +295,11 @@ export class IfMatches <M extends Routable, RESULT> {
     and <TRANSFORMRESULT> (recognizer: (result: RESULT) => IfMatches<M, TRANSFORMRESULT>) {
         return ifMatches((m: M) => toObservable(this.matcher(m))
             .map(response => normalizeMatcherResponse<RESULT>(response))
-            .flatMap(matcherResponse => isMatcherResult(matcherResponse)
+            .flatMap(matcherResponse => isMatch(matcherResponse)
                 ? toObservable(recognizer(matcherResponse.result))
                     .flatMap(_ifMatches => toObservable(_ifMatches.matcher(m))
                         .map(_response => normalizeMatcherResponse(_response))
-                        .map(_matcherResponse => isMatcherResult(_matcherResponse)
+                        .map(_matcherResponse => isMatch(_matcherResponse)
                             ? _ifMatches instanceof ifTrue
                                 ? matcherResponse
                                 : {
@@ -348,11 +346,8 @@ export class IfTrue <M extends Routable> extends IfMatches<M, boolean> {
                     return response;
                 if (typeof(response) !== 'object')
                     throw new Error('The predicate for ifTrue may only return true, false, a MatcherResult, or a NoMatch');
-                if (response.reason) {
-                    if (typeof(response.reason) === 'string')
-                        return response;
-                    throw new Error('The reason for NoMatch must be a string');
-                }
+                if (response.reason)
+                    return response;
                 if (response.result) {
                     if (response.result === true || response.result === false)
                         return response;
