@@ -343,10 +343,23 @@ export class IfTrue <M extends Routable> extends IfMatches<M, boolean> {
         predicate: Predicate<M>
     ) {
         super(m => toObservable(predicate(m))
-            .map((response: any) => typeof(response) === 'object' && (response.reason || response.result)
-                ? response
-                : !!response
-            )
+            .map((response: any) => {
+                if (response === true || response === false)
+                    return response;
+                if (typeof(response) !== 'object')
+                    throw new Error('The predicate for ifTrue may only return true, false, a MatcherResult, or a NoMatch');
+                if (response.reason) {
+                    if (typeof(response.reason) === 'string')
+                        return response;
+                    throw new Error('The reason for NoMatch must be a string');
+                }
+                if (response.result) {
+                    if (response.result === true || response.result === false)
+                        return response;
+                    throw new Error('The result for the MatcherResult for IfTrue must be true or false');
+                }
+                throw new Error('The predicate for ifTrue may only return true, false, a MatcherResult, or a NoMatch');
+            })
         );
     }
 }
